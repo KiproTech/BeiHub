@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # BeiHub
 
 BeiHub is a Kenyan online catalogue and order-management website for electronics, appliances, water tanks, solar and power equipment, computers, CCTV and networking.
@@ -153,4 +154,23 @@ public/sample-products/        sample illustrations (replace with real photos)
 - Order submission has a basic guard of 5 orders per phone number per 10 minutes. For heavy public traffic consider adding Cloudflare Turnstile / rate limiting in front of the site.
 - Sample brands, models and prices are illustrative only. Replace them with your real catalogue.
 - BeiHub is an original design and is not affiliated with any other store.
+=======
+# React + Vite
+
+This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+
+Currently, two official plugins are available:
+
+- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
+- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+
+## React Compiler
+
+The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+
+## Expanding the Oxlint configuration
+
+If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
+# BeiHub
+>>>>>>> 01070e85c10ded31d742076ddcacbd414524ffde
 # BeiHub
