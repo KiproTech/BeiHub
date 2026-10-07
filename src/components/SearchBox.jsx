@@ -36,7 +36,7 @@ export default function SearchBox({ initial = '', className = '', placeholder = 
   const submit = (e) => {
     e.preventDefault()
     setOpen(false)
-    navigate(`/shop${q.trim() ? `?q=${encodeURIComponent(q.trim())}` : ''}`)
+    navigate(`/products${q.trim() ? `?q=${encodeURIComponent(q.trim())}` : ''}`)
   }
   const go = (to) => {
     setOpen(false)
@@ -66,7 +66,7 @@ export default function SearchBox({ initial = '', className = '', placeholder = 
       {open && (hits.length > 0 || cats.length > 0) && (
         <div className="suggest" role="listbox">
           {cats.map((c) => (
-            <button key={c.id} type="button" className="suggest-row" onClick={() => go(`/shop?category=${c.slug}`)}>
+            <button key={c.id} type="button" className="suggest-row" onClick={() => go(`/products?category=${c.slug}`)}>
               <Icon name="grid" size={18} />
               <span>Category: <strong>{c.name}</strong></span>
             </button>

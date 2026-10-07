@@ -22,7 +22,48 @@ function saveSession(s) {
   listeners.forEach((fn) => fn(session))
 }
 
+// Supabase email links come back as  /path#access_token=...&type=signup|recovery  (or #error=...).
+// We read it once at startup, store the session, and clean the address bar.
+let authEvent = null
+function parseAuthRedirect() {
+  try {
+    const h = window.location.hash
+    if (!h || h.length < 2 || !/(access_token|error)=/.test(h)) return
+    const p = new URLSearchParams(h.slice(1))
+    const clean = () => window.history.replaceState(null, '', window.location.pathname + window.location.search)
+    if (p.get('error') || p.get('error_code')) {
+      authEvent = { type: 'error', code: p.get('error_code') || p.get('error'), message: (p.get('error_description') || 'This link is invalid or has expired.').replace(/\+/g, ' ') }
+      clean()
+      return
+    }
+    if (!p.get('access_token')) return
+    session = {
+      access_token: p.get('access_token'),
+      refresh_token: p.get('refresh_token'),
+      expires_at: Number(p.get('expires_at')) || Math.floor(Date.now() / 1000) + (Number(p.get('expires_in')) || 3600),
+      user: null,
+    }
+    try {
+      localStorage.setItem(SESSION_KEY, JSON.stringify(session))
+    } catch {
+      /* storage unavailable */
+    }
+    authEvent = { type: p.get('type') || 'signup' }
+    clean()
+  } catch {
+    /* ignore malformed hashes */
+  }
+}
+parseAuthRedirect()
+export const takeAuthEvent = () => {
+  const e = authEvent
+  authEvent = null
+  return e
+}
+
 export const getSession = () => session
+// the current access token for Realtime (refreshes it first when it is about to expire)
+export const getAccessToken = () => token()
 export const onAuthChange = (fn) => {
   listeners.add(fn)
   return () => listeners.delete(fn)
@@ -93,6 +134,64 @@ export async function signOut() {
   }
 }
 
+const here = (path) => encodeURIComponent(`${window.location.origin}${path}`)
+
+// Create a customer account. With "Confirm email" ON in Supabase the user must click the emailed link first.
+export async function signUp(email, password, meta = {}) {
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/signup?redirect_to=${here('/login')}`, {
+    method: 'POST',
+    headers: { apikey: SUPABASE_ANON_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password, data: meta }),
+  })
+  const d = await parse(res)
+  if (d && d.access_token) {
+    saveSession(toSession(d))
+    return { needsVerification: false }
+  }
+  // Supabase hides whether an address is already registered: it answers with an empty identities list.
+  return { needsVerification: true, alreadyRegistered: !!(d && Array.isArray(d.identities) && d.identities.length === 0) }
+}
+
+export async function resendVerification(email) {
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/resend?redirect_to=${here('/login')}`, {
+    method: 'POST',
+    headers: { apikey: SUPABASE_ANON_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type: 'signup', email }),
+  })
+  await parse(res)
+}
+
+export async function recoverPassword(email) {
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/recover?redirect_to=${here('/reset-password')}`, {
+    method: 'POST',
+    headers: { apikey: SUPABASE_ANON_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email }),
+  })
+  await parse(res)
+}
+
+export async function updatePassword(password) {
+  const t = await token()
+  if (!t) throw new Error('Auth session missing')
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+    method: 'PUT',
+    headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${t}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password }),
+  })
+  const d = await parse(res)
+  if (session) saveSession({ ...session, user: d })
+}
+
+// Re-read the auth user (to see whether the email is now verified).
+export async function refreshAuthUser() {
+  const t = await token()
+  if (!t) return null
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/user`, { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${t}` } })
+  const d = await parse(res)
+  if (session) saveSession({ ...session, user: d })
+  return d
+}
+
 async function token() {
   if (session && session.expires_at - 30 < Math.floor(Date.now() / 1000)) await refreshSession()
   return session?.access_token || null
@@ -113,7 +212,8 @@ const qs = (obj = {}) => {
 export const db = {
   // select('products', { select: '*,product_images(*)', filters: { is_active: 'eq.true' }, order: 'created_at.desc' })
   async select(table, { select = '*', filters = {}, order, limit } = {}) {
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/${table}${qs({ select, ...filters, order, limit })}`, { headers: await headers() })
+    // cache: 'no-store' - a browser (or proxy) must never answer from an old copy: the database is the truth
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/${table}${qs({ select, ...filters, order, limit })}`, { headers: await headers(), cache: 'no-store' })
     return parse(res)
   },
   async insert(table, rows, { onConflict } = {}) {

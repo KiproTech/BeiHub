@@ -4,6 +4,8 @@ import { Empty, ProductImage, QtyStepper } from '../components/ui.jsx'
 import { TotalsBox } from '../components/OrderParts.jsx'
 import { useList } from '../context/ListContext.jsx'
 import { useStore } from '../context/StoreContext.jsx'
+import { useAuth } from '../context/AuthContext.jsx'
+import { rememberNext } from '../lib/nextPath.js'
 import { COUNTIES } from '../data/counties.js'
 import { money } from '../lib/format.js'
 import { buildOrderMessage, waLink } from '../lib/whatsapp.js'
@@ -12,14 +14,15 @@ export default function OrderList() {
   const list = useList()
   const { settings, loading } = useStore()
   const navigate = useNavigate()
+  const { user } = useAuth()
   const { lines, totals, customer, deliveryPending, hasProblems, valid } = list
   const needsCounty = settings.delivery_mode === 'county' || settings.delivery_mode === 'town'
 
   if (!lines.length)
     return (
       <div className="wrap section">
-        <Empty title="Your Order List is empty" action={<Link to="/shop" className="btn btn-primary btn-lg">Browse products</Link>}>
-          Add the products you want, then send your order. No online payment is needed.
+        <Empty title="Your Order List is empty" action={<Link to="/products" className="btn btn-primary btn-lg">Browse products</Link>}>
+          Add the products you want, then review and place your order. No online payment is needed.
         </Empty>
       </div>
     )
@@ -33,14 +36,14 @@ export default function OrderList() {
 
   return (
     <div className="wrap listpage">
-      <h1>Your Order List</h1>
-      <p className="muted">Review your items, then continue to enter your delivery details. You will not be asked to pay online.</p>
+      <h1>Review your order</h1>
+      <p className="muted">Check your items and quantities. Next you will confirm your contact details. You will not be asked to pay online{user ? '' : ', and you only need to log in when you place the order'}.</p>
 
       <div className="listpage-grid">
         <div className="lines">
           {lines.map((l) => (
             <div key={l.variantId} className={`line ${l.missing || !l.canOrder ? 'line-bad' : ''}`}>
-              <Link to={l.product ? `/product/${l.product.slug}?v=${l.variantId}` : '/shop'} className="line-img">
+              <Link to={l.product ? `/product/${l.product.slug}?v=${l.variantId}` : '/products'} className="line-img">
                 <ProductImage src={l.image} alt="" />
               </Link>
               <div className="line-main">
@@ -69,7 +72,7 @@ export default function OrderList() {
             </div>
           ))}
           <div className="lines-foot">
-            <Link to="/shop" className="btn btn-outline"><Icon name="left" size={16} /> Continue shopping</Link>
+            <Link to="/products" className="btn btn-outline"><Icon name="left" size={16} /> Continue shopping</Link>
             <button className="link-btn" onClick={() => window.confirm('Remove all items from your Order List?') && list.clear()}>Clear list</button>
           </div>
         </div>
@@ -87,16 +90,17 @@ export default function OrderList() {
           )}
           <TotalsBox totals={totals} settings={settings} deliveryPending={deliveryPending} />
           {deliveryPending && <p className="muted small">Delivery fee depends on your county. Choose it above to see your full total.</p>}
-          <button className="btn btn-primary btn-lg btn-block" disabled={hasProblems || !valid.length || loading} onClick={() => navigate('/checkout')}>
-            Continue to delivery details
+          <button className="btn btn-primary btn-lg btn-block" disabled={hasProblems || !valid.length || loading} onClick={() => { if (!user) rememberNext('/checkout'); navigate(user ? '/checkout' : '/login?next=/checkout') }}>
+            {user ? 'Continue to contact details' : 'Log in to place order'}
           </button>
+          {!user && <p className="muted small center">New here? <Link to="/register?next=/checkout">Create a free account</Link>. Your list is saved.</p>}
           {settings.whatsapp && valid.length > 0 && (
             <a className="btn btn-wa btn-block" target="_blank" rel="noreferrer" href={waLink(settings.whatsapp, message)}>
-              <WhatsAppIcon size={20} /> Order via WhatsApp
+              <WhatsAppIcon size={20} /> Ask us on WhatsApp
             </a>
           )}
           <ul className="summary-notes">
-            <li><Icon name="wallet" size={16} /> Pay {settings.deposit_percent}% deposit after we confirm. Balance on delivery.</li>
+            {settings.deposit_percent != null && <li><Icon name="wallet" size={16} /> A deposit of up to {settings.deposit_percent}% may be required after we confirm. Balance on delivery.</li>}
             <li><Icon name="shield" size={16} /> Prices are confirmed when you submit.</li>
           </ul>
         </aside>

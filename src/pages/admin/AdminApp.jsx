@@ -5,7 +5,6 @@ import { Spinner } from '../../components/ui.jsx'
 import { useAuth } from '../../context/AuthContext.jsx'
 import { useStore } from '../../context/StoreContext.jsx'
 import { friendlyError } from '../../lib/errors.js'
-import { DEMO_ADMIN, IS_DEMO } from '../../lib/config.js'
 import { AdminProvider, useAdmin } from './AdminContext.jsx'
 import Dashboard from './Dashboard.jsx'
 import Products from './Products.jsx'
@@ -15,22 +14,26 @@ import Orders, { OrderDetail } from './Orders.jsx'
 import Customers from './Customers.jsx'
 import Delivery from './Delivery.jsx'
 import Settings from './Settings.jsx'
+import Media from './Media.jsx'
+import Audit from './Audit.jsx'
 import '../../styles/admin.css'
 
 const NAV = [
   { to: '/admin', icon: 'dash', label: 'Dashboard', exact: true },
+  { to: '/admin/orders', icon: 'list', label: 'Orders' },
   { to: '/admin/products', icon: 'box', label: 'Products' },
   { to: '/admin/categories', icon: 'grid', label: 'Categories' },
-  { to: '/admin/orders', icon: 'list', label: 'Orders' },
   { to: '/admin/customers', icon: 'users', label: 'Customers' },
   { to: '/admin/delivery', icon: 'truck', label: 'Delivery' },
-  { to: '/admin/settings', icon: 'settings', label: 'Settings' },
+  { to: '/admin/media', icon: 'image', label: 'Media' },
+  { to: '/admin/settings', icon: 'settings', label: 'Business Settings' },
+  { to: '/admin/audit', icon: 'history', label: 'Audit Logs' },
 ]
 
 function Login() {
   const { signIn, user, signOut } = useAuth()
-  const [email, setEmail] = useState(IS_DEMO ? DEMO_ADMIN.email : '')
-  const [password, setPassword] = useState(IS_DEMO ? DEMO_ADMIN.password : '')
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const submit = async (e) => {
@@ -48,7 +51,7 @@ function Login() {
   return (
     <div className="login">
       <form className="login-card" onSubmit={submit}>
-        <div className="login-brand"><LogoMark size={46} /><div><b>BeiHub</b><span>Admin sign in</span></div></div>
+        <div className="login-brand"><LogoMark size={46} /><div><b>Admin</b><span>Sign in</span></div></div>
         {user && user.role !== 'admin' ? (
           <>
             <div className="notice notice-bad">You are signed in as {user.email}, but this account is not an admin. Ask the owner to give you admin access.</div>
@@ -56,14 +59,13 @@ function Login() {
           </>
         ) : (
           <>
-            {IS_DEMO && <div className="notice notice-warn">Demo mode. Use <b>{DEMO_ADMIN.email}</b> / <b>{DEMO_ADMIN.password}</b> (already filled in).</div>}
             {error && <div className="notice notice-bad" role="alert">{error}</div>}
             <label className="field"><span>Email</span><input type="email" autoComplete="username" required value={email} onChange={(e) => setEmail(e.target.value)} /></label>
             <label className="field"><span>Password</span><input type="password" autoComplete="current-password" required value={password} onChange={(e) => setPassword(e.target.value)} /></label>
             <button className="btn btn-primary btn-lg btn-block" disabled={busy}>{busy ? 'Signing in...' : 'Sign in'}</button>
           </>
         )}
-        <Link to="/" className="login-back">Back to the shop</Link>
+        <Link to="/" className="login-back">Back to the website</Link>
       </form>
     </div>
   )
@@ -85,6 +87,8 @@ function Shell() {
     { path: '/admin/products/new', render: () => <ProductEditor key="new" /> },
     { path: '/admin/products/:id', render: (p) => <ProductEditor key={p.id} id={p.id} /> },
     { path: '/admin/categories', render: () => <Categories /> },
+    { path: '/admin/media', render: () => <Media /> },
+    { path: '/admin/audit', render: () => <Audit /> },
     { path: '/admin/orders', render: () => <Orders /> },
     { path: '/admin/orders/:id', render: (p) => <OrderDetail key={p.id} id={p.id} /> },
     { path: '/admin/customers', render: () => <Customers /> },
@@ -97,7 +101,7 @@ function Shell() {
       <header className="admin-top">
         <button className="icon-btn" aria-label="Open menu" onClick={() => setOpen(true)}><Icon name="menu" /></button>
         <b>{settings.business_name} Admin</b>
-        <Link to="/" className="btn btn-sm btn-outline">View shop</Link>
+        <Link to="/" className="btn btn-sm btn-outline">View website</Link>
       </header>
       {open && <div className="admin-scrim" onClick={() => setOpen(false)} />}
       <aside className={`admin-side ${open ? 'is-open' : ''}`}>
@@ -118,7 +122,7 @@ function Shell() {
           })}
         </nav>
         <div className="admin-foot">
-          <Link to="/" className="admin-link"><Icon name="eye" size={20} /> View shop</Link>
+          <Link to="/" className="admin-link"><Icon name="eye" size={20} /> View website</Link>
           <button className="admin-link" onClick={async () => { await signOut(); navigate('/admin') }}><Icon name="logout" size={20} /> Sign out</button>
           <small>{user?.email}</small>
         </div>

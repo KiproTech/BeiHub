@@ -32,7 +32,7 @@ function CategoryForm({ cat, onClose }) {
   return (
     <Modal title={f.id ? 'Edit category' : 'Add category'} onClose={onClose} footer={<><button className="btn btn-outline" onClick={onClose}>Cancel</button><button className="btn btn-primary" disabled={busy} onClick={save}>Save category</button></>}>
       <Field label="Category name"><input value={f.name} onChange={(e) => { set('name', e.target.value); if (!slugTouched) set('slug', slugify(e.target.value)) }} placeholder="e.g. Water Tanks" /></Field>
-      <Field label="Web address (slug)" hint="Used in links, e.g. /shop?category=water-tanks"><input value={f.slug} onChange={(e) => { setSlugTouched(true); set('slug', slugify(e.target.value)) }} /></Field>
+      <Field label="Web address (slug)" hint="Used in links, e.g. /products?category=water-tanks"><input value={f.slug} onChange={(e) => { setSlugTouched(true); set('slug', slugify(e.target.value)) }} /></Field>
       <Field label="Short description (optional)"><textarea rows={2} value={f.description || ''} onChange={(e) => set('description', e.target.value)} /></Field>
       <div className="field">
         <span>Category image</span>

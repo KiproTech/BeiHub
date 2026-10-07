@@ -51,13 +51,12 @@ export default function Delivery() {
 
   const save = async () => {
     const payload = {
-      ...settings,
       delivery_mode: s.delivery_mode,
       fixed_delivery_fee: Number(s.fixed_delivery_fee) || 0,
       default_delivery_fee: Number(s.default_delivery_fee) || 0,
       free_delivery_threshold: s.free_delivery_threshold === '' ? null : Number(s.free_delivery_threshold),
     }
-    if (await run(() => api.saveSettings(payload), 'Delivery settings saved')) reload()
+    if (await run(() => api.saveSettings(payload, settings), 'Delivery settings saved')) reload()
   }
   const del = async (l) => {
     if (!confirmDelete(`the fee for ${l.town ? l.town + ', ' : ''}${l.county}`)) return

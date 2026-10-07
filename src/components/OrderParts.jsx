@@ -1,8 +1,12 @@
 import { money, fmtDate, statusInfo } from '../lib/format.js'
-import { ProductImage } from './ui.jsx'
+import { ProductImage, StatusPill } from './ui.jsx'
+import { Icon } from './Icons.jsx'
+import { trackerSteps, trackerIndex, statusInfo as flowStatus, paymentInfo } from '../lib/orderFlow.js'
+
+const fmt = fmtDate
 
 export function TotalsBox({ totals, settings, deliveryPending, deliveryLabel }) {
-  const pct = settings.deposit_percent
+  const pct = settings.deposit_percent ?? 0
   return (
     <dl className="totals">
       <div><dt>Items subtotal</dt><dd>{money(totals.subtotal)}</dd></div>
@@ -41,11 +45,11 @@ export function OrderSheet({ order, settings, signatures }) {
       <div className="sheetdoc-cols">
         <section>
           <h3>Customer</h3>
-          <p><b>{order.customer_name}</b><br />Phone: {order.phone}{order.whatsapp ? <><br />WhatsApp: {order.whatsapp}</> : null}</p>
+          <p><b>{order.customer_name}</b><br />Phone: {order.phone}{order.alternative_phone ? <><br />Alt. phone: {order.alternative_phone}</> : null}{order.whatsapp ? <><br />WhatsApp: {order.whatsapp}</> : null}{order.customer_email ? <><br />Email: {order.customer_email}</> : null}</p>
         </section>
         <section>
-          <h3>Delivery</h3>
-          <p>{order.delivery_location}<br />{order.town}, {order.county}{order.preferred_delivery_date ? <><br />Preferred date: {fmtDate(order.preferred_delivery_date)}</> : null}</p>
+          <h3>{order.fulfilment_method === 'pickup' ? 'Pickup' : 'Delivery'}</h3>
+          <p>{order.fulfilment_method === 'pickup' ? 'Customer pickup' : <>{order.delivery_location}<br />{order.town}, {order.county}</>}{order.preferred_delivery_date ? <><br />Preferred date: {fmtDate(order.preferred_delivery_date)}</> : null}</p>
         </section>
       </div>
 
@@ -92,5 +96,76 @@ export function OrderSheet({ order, settings, signatures }) {
         </div>
       )}
     </div>
+  )
+}
+
+/* ---------- order tracking (customer + admin) ---------- */
+
+export const OrderStatusPill = ({ status }) => <StatusPill info={flowStatus(status)} />
+export const PaymentPill = ({ status }) => <StatusPill info={paymentInfo(status)} />
+
+// Horizontal progress: Submitted > Confirmed > Payment > Processing > Ready > Completed
+export function OrderTracker({ order }) {
+  if (order.status === 'cancelled') {
+    return (
+      <div className="notice notice-bad" role="status">
+        <Icon name="alert" size={18} />
+        <span>
+          This order was cancelled{order.cancelled_at ? ` on ${fmt(order.cancelled_at, true)}` : ''}.
+          {order.cancellation_reason ? <> <b>Reason:</b> {order.cancellation_reason}</> : null}
+        </span>
+      </div>
+    )
+  }
+  const steps = trackerSteps(order)
+  const at = trackerIndex(order)
+  return (
+    <ol className="tracker" aria-label="Order progress">
+      {steps.map((s, i) => (
+        <li key={s.key} className={i < at || order.status === 'completed' ? 'is-done' : i === at ? 'is-current' : ''} aria-current={i === at ? 'step' : undefined}>
+          <span className="tracker-dot">{i < at || order.status === 'completed' ? <Icon name="check" size={14} stroke={3} /> : i + 1}</span>
+          <span className="tracker-label">{s.label}</span>
+        </li>
+      ))}
+    </ol>
+  )
+}
+
+// Vertical history with date/time of every important change
+export function OrderTimeline({ events, admin }) {
+  const list = (events || []).filter((e) => admin || e.visible_to_customer !== false)
+  if (!list.length) return <p className="muted small">No updates yet.</p>
+  return (
+    <ol className="timeline">
+      {list.map((e) => (
+        <li key={e.id} className={`timeline-item ${e.visible_to_customer === false ? 'is-internal' : ''} ${e.to_status === 'cancelled' ? 'is-bad' : ''}`}>
+          <span className="timeline-dot" />
+          <div>
+            <b>{e.title}</b>
+            {e.visible_to_customer === false && <span className="chip">Internal</span>}
+            {e.message && <p>{e.message}</p>}
+            <time dateTime={e.created_at}>{fmt(e.created_at, true)}</time>
+          </div>
+        </li>
+      ))}
+    </ol>
+  )
+}
+
+// Contact details stored WITH the order (never read from the live profile)
+export function OrderContact({ order }) {
+  const pref = { phone: 'Phone call', whatsapp: 'WhatsApp', email: 'Email' }[order.preferred_contact] || 'Phone call'
+  return (
+    <dl className="defs">
+      <div><dt>Full name</dt><dd>{order.customer_name}</dd></div>
+      <div><dt>Phone</dt><dd><a href={`tel:${String(order.phone).replace(/\s/g, '')}`}>{order.phone}</a></dd></div>
+      {order.alternative_phone && <div><dt>Alternative phone</dt><dd>{order.alternative_phone}</dd></div>}
+      {order.whatsapp && <div><dt>WhatsApp</dt><dd>{order.whatsapp}</dd></div>}
+      <div><dt>Email</dt><dd>{order.customer_email ? <a href={`mailto:${order.customer_email}`}>{order.customer_email}</a> : <span className="muted">Not recorded</span>}</dd></div>
+      <div><dt>Preferred contact</dt><dd>{pref}</dd></div>
+      <div><dt>{order.fulfilment_method === 'pickup' ? 'Collection' : 'Delivery'}</dt><dd>{order.fulfilment_method === 'pickup' ? 'Customer pickup' : `${order.delivery_location}, ${order.town}, ${order.county}`}</dd></div>
+      {order.preferred_delivery_date && <div><dt>Preferred date</dt><dd>{fmt(order.preferred_delivery_date)}</dd></div>}
+      {order.notes && <div><dt>Customer notes</dt><dd>{order.notes}</dd></div>}
+    </dl>
   )
 }

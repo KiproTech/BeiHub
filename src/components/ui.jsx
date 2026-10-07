@@ -98,6 +98,42 @@ export function Modal({ title, onClose, children, wide, footer }) {
   )
 }
 
-export function ProductImage({ src, alt, className = '', ...rest }) {
-  return <img className={`pimg ${className}`} src={src || '/sample-products/placeholder.svg'} alt={alt || ''} loading="lazy" decoding="async" {...rest} />
+// default image chosen by the admin (Admin > Media), used when a product has no picture
+let defaults = { product: null }
+export const setDefaultImages = (d) => {
+  defaults = { ...defaults, ...d }
+}
+export function ProductImage({ src, alt, className = '', fallback = 'product', ...rest }) {
+  return <img className={`pimg ${className}`} src={src || defaults[fallback] || '/sample-products/placeholder.svg'} alt={alt || ''} loading="lazy" decoding="async" {...rest} />
+}
+
+// A confirmation dialog for risky actions (replaces window.confirm on the new screens)
+export function ConfirmDialog({ title, children, confirmLabel = 'Confirm', tone = 'primary', busy, disabled, onConfirm, onClose }) {
+  return (
+    <Modal
+      title={title}
+      onClose={onClose}
+      footer={
+        <>
+          <button className="btn btn-outline" onClick={onClose} disabled={busy}>Go back</button>
+          <button className={`btn ${tone === 'danger' ? 'btn-danger' : 'btn-primary'}`} onClick={onConfirm} disabled={busy || disabled}>{busy ? 'Please wait...' : confirmLabel}</button>
+        </>
+      }
+    >
+      {children}
+    </Modal>
+  )
+}
+
+export function StatusPill({ info }) {
+  return <span className={`pill pill-${info.tone}`}>{info.label}</span>
+}
+
+export function ErrorBox({ children, onRetry }) {
+  return (
+    <div className="notice notice-bad" role="alert">
+      <span>{children}</span>
+      {onRetry && <button className="btn btn-sm btn-outline" onClick={onRetry}>Try again</button>}
+    </div>
+  )
 }

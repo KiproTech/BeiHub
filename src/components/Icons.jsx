@@ -39,6 +39,13 @@ const P = {
   bag: 'M5 8h14l-1 12H6zM9 8V6a3 3 0 0 1 6 0v2',
   home: 'M4 11l8-7 8 7v9h-5v-6H9v6H4z',
   swap: 'M7 4v14M7 18l-3-3m3 3 3-3M17 20V6m0 0-3 3m3-3 3 3',
+  bell: 'M6 16V11a6 6 0 1 1 12 0v5l2 2H4zM10 21h4',
+  user: 'M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 21a8 8 0 0 1 16 0',
+  store: 'M4 9l1.5-5h13L20 9M4 9h16M4 9a2.5 2.5 0 0 0 5 0 2.5 2.5 0 0 0 5 0 2.5 2.5 0 0 0 5 0M5 12v8h14v-8M10 20v-5h4v5',
+  clipboard: 'M9 4h6v3H9zM7 5H5v16h14V5h-2M8 12h8M8 16h5',
+  lock: 'M6 11h12v9H6zM8 11V8a4 4 0 0 1 8 0v3',
+  locate: 'M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zM12 2v3M12 19v3M2 12h3M19 12h3',
+  history: 'M4 12a8 8 0 1 0 3-6.2M4 4v4h4M12 8v4l3 2',
 }
 
 export function Icon({ name, size = 20, className = '', stroke = 2, ...rest }) {

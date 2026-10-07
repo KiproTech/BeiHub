@@ -3,6 +3,7 @@ import { Link, useSearchParams } from '../../lib/router.jsx'
 import { Icon } from '../../components/Icons.jsx'
 import { ProductImage } from '../../components/ui.jsx'
 import { Card, PageHead, Toggle, confirmDelete } from './parts.jsx'
+import { PRODUCT_STATUSES, productStatusInfo } from '../../lib/format.js'
 import { useAdmin } from './AdminContext.jsx'
 import { api } from '../../lib/api.js'
 import { discountPercent, money } from '../../lib/format.js'
@@ -68,7 +69,7 @@ function PricesTab({ rows }) {
   return (
     <div className="pricegroups">
       {rows.map((p) => (
-        <Card key={p.id} title={p.name} sub={p.is_active ? null : 'Hidden from website'} actions={<Link to={`/admin/products/${p.id}`} className="btn btn-sm btn-outline"><Icon name="edit" size={16} /> Edit product</Link>}>
+        <Card key={p.id} title={p.name} sub={p.status === 'available' ? null : `Status: ${productStatusInfo(p.status).label}`} actions={<Link to={`/admin/products/${p.id}`} className="btn btn-sm btn-outline"><Icon name="edit" size={16} /> Edit product</Link>}>
           <div className="tablewrap">
             <table className="table table-stack pricetable">
               <thead>
@@ -96,9 +97,7 @@ export default function Products() {
     const t = tokenize(q)
     return products.filter((p) => {
       if (cat && p.category_id !== cat) return false
-      if (status === 'hidden' && p.is_active) return false
-      if (status === 'live' && !p.is_active) return false
-      if (status === 'featured' && !p.is_featured) return false
+      if (status === 'featured' ? !p.is_featured : status && p.status !== status) return false
       return !!matchProduct(p, catById[p.category_id]?.name || '', t)
     })
   }, [products, q, cat, status, catById])
@@ -129,8 +128,7 @@ export default function Products() {
             <span className="sr-only">Status</span>
             <select value={status} onChange={(e) => setStatus(e.target.value)}>
               <option value="">Any status</option>
-              <option value="live">Live on website</option>
-              <option value="hidden">Hidden</option>
+              {PRODUCT_STATUSES.map((st) => <option key={st.key} value={st.key}>{st.label}</option>)}
               <option value="featured">Featured</option>
             </select>
             <Icon name="down" size={16} />
@@ -158,7 +156,11 @@ export default function Products() {
                       <small className="rowitem-price">{prices.length ? (Math.min(...prices) === Math.max(...prices) ? money(prices[0]) : `${money(Math.min(...prices))} - ${money(Math.max(...prices))}`) : 'No variants'}</small>
                     </div>
                     <div className="rowitem-flags">
-                      <Toggle checked={p.is_active} onChange={(v) => patch(p, { is_active: v }, v ? 'Product is now live' : 'Product hidden')} label={p.is_active ? 'Live' : 'Hidden'} />
+                      <label className="select-wrap select-sm"><span className="sr-only">Status of {p.name}</span>
+                        <select value={p.status} onChange={(e) => patch(p, { status: e.target.value }, `${p.name}: ${productStatusInfo(e.target.value).label}`)}>
+                          {PRODUCT_STATUSES.map((st) => <option key={st.key} value={st.key}>{st.label}</option>)}
+                        </select><Icon name="down" size={14} />
+                      </label>
                       <Toggle checked={p.is_featured} onChange={(v) => patch(p, { is_featured: v })} label="Featured" />
                     </div>
                     <div className="rowitem-act">

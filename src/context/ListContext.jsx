@@ -1,5 +1,6 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { useStore } from './StoreContext.jsx'
+import { useAuth } from './AuthContext.jsx'
 import { availability, variantTitle } from '../lib/format.js'
 import { computeDeliveryFee, orderTotals } from '../lib/pricing.js'
 
@@ -8,7 +9,7 @@ export const useList = () => useContext(Ctx)
 
 const LIST_KEY = 'beihub.list.v1'
 const CUSTOMER_KEY = 'beihub.customer.v1'
-const EMPTY_CUSTOMER = { customer_name: '', phone: '', whatsapp: '', county: '', town: '', delivery_location: '', preferred_delivery_date: '', notes: '' }
+const EMPTY_CUSTOMER = { customer_name: '', phone: '', alternative_phone: '', whatsapp: '', customer_email: '', preferred_contact: 'phone', fulfilment_method: 'delivery', county: '', town: '', delivery_location: '', preferred_delivery_date: '', notes: '' }
 
 const read = (key, fallback) => {
   try {
@@ -20,7 +21,8 @@ const read = (key, fallback) => {
 }
 
 export function ListProvider({ children }) {
-  const { variantIndex, settings, locations, loading } = useStore()
+  const { variantIndex, settings, locations, loaded } = useStore()
+  const { user } = useAuth()
   const [items, setItems] = useState(() => read(LIST_KEY, []))
   const [customer, setCustomerState] = useState(() => ({ ...EMPTY_CUSTOMER, ...read(CUSTOMER_KEY, {}) }))
 
@@ -38,6 +40,16 @@ export function ListProvider({ children }) {
       /* ignore */
     }
   }, [customer])
+
+  // Contact details typed on this device belong to whoever was logged in: forget them on log out.
+  const hadUser = useRef(false)
+  useEffect(() => {
+    if (user) hadUser.current = true
+    else if (hadUser.current) {
+      hadUser.current = false
+      setCustomerState({ ...EMPTY_CUSTOMER })
+    }
+  }, [user])
 
   const add = useCallback((variantId, qty = 1) => {
     setItems((list) => {
@@ -67,13 +79,14 @@ export function ListProvider({ children }) {
     })
     const valid = lines.filter((l) => !l.missing && l.canOrder)
     const subtotal = valid.reduce((a, l) => a + l.lineTotal, 0)
-    const deliveryPending = (settings.delivery_mode === 'county' || settings.delivery_mode === 'town') && !customer.county
-    const deliveryFee = deliveryPending ? 0 : computeDeliveryFee(settings, locations, customer.county, customer.town, subtotal)
+    const pickup = customer.fulfilment_method === 'pickup'
+    const deliveryPending = !pickup && (settings.delivery_mode === 'county' || settings.delivery_mode === 'town') && !customer.county
+    const deliveryFee = pickup || deliveryPending ? 0 : computeDeliveryFee(settings, locations, customer.county, customer.town, subtotal)
     const totals = orderTotals(subtotal, deliveryFee, settings.deposit_percent)
     const count = items.reduce((a, i) => a + i.qty, 0)
     const hasProblems = lines.some((l) => l.missing || !l.canOrder)
-    return { items, lines, valid, count, totals, customer, hasProblems, loadingCatalog: loading, add, setQty, remove, clear, setCustomer, resetCustomerNotes, deliveryPending }
-  }, [items, variantIndex, settings, locations, customer, loading, add, setQty, remove, clear, setCustomer, resetCustomerNotes])
+    return { items, lines, valid, count, totals, customer, hasProblems, loadingCatalog: !loaded, add, setQty, remove, clear, setCustomer, resetCustomerNotes, deliveryPending }
+  }, [items, variantIndex, settings, locations, customer, loaded, add, setQty, remove, clear, setCustomer, resetCustomerNotes])
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>
 }

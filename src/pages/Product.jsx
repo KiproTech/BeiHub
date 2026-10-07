@@ -80,7 +80,7 @@ export default function Product({ slug }) {
   if (!product)
     return (
       <div className="wrap section">
-        <Empty title="Product not found" action={<Link to="/shop" className="btn btn-primary">Browse all products</Link>}>
+        <Empty title="Product not found" action={<Link to="/products" className="btn btn-primary">Browse all products</Link>}>
           This product may have been removed or is no longer on sale.
         </Empty>
       </div>
@@ -113,7 +113,7 @@ export default function Product({ slug }) {
         <Link to="/">Home</Link> <Icon name="right" size={14} />
         {cat && (
           <>
-            <Link to={`/shop?category=${cat.slug}`}>{cat.name}</Link> <Icon name="right" size={14} />
+            <Link to={`/products?category=${cat.slug}`}>{cat.name}</Link> <Icon name="right" size={14} />
           </>
         )}
         <span>{product.name}</span>
@@ -124,7 +124,7 @@ export default function Product({ slug }) {
 
         <div className="pdp-info">
           <div className="pdp-tags">
-            {cat && <Link to={`/shop?category=${cat.slug}`} className="pcard-cat">{cat.name}</Link>}
+            {cat && <Link to={`/products?category=${cat.slug}`} className="pcard-cat">{cat.name}</Link>}
             {product.brand && <span className="chip">{product.brand}</span>}
             {product.is_new && <span className="chip chip-new">New</span>}
           </div>
@@ -192,7 +192,7 @@ export default function Product({ slug }) {
             <div className="notice notice-good">
               <Icon name="check" size={18} /> Added to your Order List.
               <Link to="/order-list" className="btn btn-sm btn-dark">View Order List</Link>
-              <Link to="/shop" className="btn btn-sm btn-outline">Continue shopping</Link>
+              <Link to="/products" className="btn btn-sm btn-outline">Continue shopping</Link>
             </div>
           )}
 
@@ -202,8 +202,15 @@ export default function Product({ slug }) {
             </a>
           )}
 
+          {(settings.phone || settings.delivery_info) && (
+            <div className="storebox">
+              {settings.delivery_info && <p><Icon name="truck" size={16} /> {settings.delivery_info}</p>}
+              {settings.phone && <p><Icon name="phone" size={16} /> <a href={`tel:${settings.phone.replace(/\s/g, '')}`}>{settings.phone}</a>{settings.business_hours ? <span className="muted"> &middot; {settings.business_hours}</span> : null}</p>}
+            </div>
+          )}
+
           <ul className="pdp-assure">
-            <li><Icon name="wallet" size={18} /> Pay {settings.deposit_percent}% deposit to confirm, balance on delivery</li>
+            {settings.deposit_percent != null && <li><Icon name="wallet" size={18} /> A deposit of up to {settings.deposit_percent}% may be required to confirm your order</li>}
             <li><Icon name="truck" size={18} /> Delivery fee is shown before you submit your order</li>
             {variant?.sku && <li><Icon name="tag" size={18} /> SKU: {variant.sku}</li>}
           </ul>

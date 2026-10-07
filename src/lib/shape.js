@@ -15,12 +15,18 @@ export function shapeProduct(row) {
     ...rest,
     specs: rest.specs || {},
     images: [...(row.images || product_images || [])].sort(bySort),
-    variants: [...(row.variants || product_variants || [])].sort(bySort).map(shapeVariant),
+    variants: [...(row.variants || product_variants || [])].sort(bySort).map((v) => ({ ...shapeVariant(v), product_status: rest.status || 'available' })),
   }
 }
 
+const byTime = (a, b) => String(a.created_at || '').localeCompare(String(b.created_at || ''))
+
 export const shapeOrder = (o) => ({
   ...o,
+  status: o.status || 'pending',
+  payment_status: o.payment_status || 'unpaid',
+  fulfilment_method: o.fulfilment_method || 'delivery',
+  events: [...(o.events || o.order_events || [])].sort(byTime),
   subtotal: Number(o.subtotal),
   delivery_fee: Number(o.delivery_fee),
   total: Number(o.total),

@@ -25,6 +25,7 @@ export const variantTitle = (product, variant) =>
 // effective availability of a variant, taking stock into account
 export function availability(v) {
   if (!v) return { key: 'out', label: 'Unavailable', tone: 'bad', canOrder: false, max: 0 }
+  if (v.product_status === 'out_of_stock') return { key: 'out', label: 'Out of stock', tone: 'bad', canOrder: false, max: 0 }
   if (v.availability === 'out_of_stock' || (v.availability === 'in_stock' && v.stock <= 0))
     return { key: 'out', label: 'Out of stock', tone: 'bad', canOrder: false, max: 0 }
   if (v.availability === 'on_order') return { key: 'order', label: 'Available on order', tone: 'warn', canOrder: true, max: 100 }
@@ -32,15 +33,15 @@ export function availability(v) {
   return { key: 'in', label: 'In stock', tone: 'good', canOrder: true, max: Math.min(v.stock, 100) }
 }
 
-export const ORDER_STATUSES = [
-  { key: 'pending', label: 'New - awaiting confirmation', short: 'New', tone: 'warn' },
-  { key: 'confirmed', label: 'Confirmed - awaiting deposit', short: 'Confirmed', tone: 'info' },
-  { key: 'deposit_paid', label: 'Deposit received', short: 'Deposit paid', tone: 'info' },
-  { key: 'out_for_delivery', label: 'Out for delivery', short: 'Out for delivery', tone: 'info' },
-  { key: 'delivered', label: 'Delivered', short: 'Delivered', tone: 'good' },
-  { key: 'cancelled', label: 'Cancelled', short: 'Cancelled', tone: 'bad' },
+export { ORDER_STATUSES, statusInfo } from './orderFlow.js'
+
+export const PRODUCT_STATUSES = [
+  { key: 'available', label: 'Available', tone: 'good' },
+  { key: 'out_of_stock', label: 'Out of stock', tone: 'bad' },
+  { key: 'hidden', label: 'Hidden', tone: 'warn' },
+  { key: 'discontinued', label: 'Discontinued', tone: 'bad' },
 ]
-export const statusInfo = (key) => ORDER_STATUSES.find((s) => s.key === key) || ORDER_STATUSES[0]
+export const productStatusInfo = (key) => PRODUCT_STATUSES.find((s) => s.key === key) || PRODUCT_STATUSES[0]
 
 export const fmtDate = (d, withTime = false) => {
   if (!d) return '-'

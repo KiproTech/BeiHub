@@ -9,19 +9,19 @@ export default function Dashboard() {
   const today = new Date().toDateString()
   const active = orders.filter((o) => o.status !== 'cancelled')
   const pending = orders.filter((o) => o.status === 'pending')
-  const awaitingDeposit = orders.filter((o) => ['pending', 'confirmed'].includes(o.status))
+  const awaitingDeposit = orders.filter((o) => ['pending', 'confirmed', 'payment_pending'].includes(o.status))
   const todays = orders.filter((o) => new Date(o.created_at).toDateString() === today)
-  const toDeliver = orders.filter((o) => ['deposit_paid', 'out_for_delivery'].includes(o.status))
+  const toDeliver = orders.filter((o) => ['processing', 'ready_for_pickup', 'waiting_for_delivery'].includes(o.status))
   const lowRows = products.flatMap((p) => p.variants.map((v) => ({ p, v, a: availability(v) }))).filter((r) => r.v.availability !== 'on_order' && ['out', 'low'].includes(r.a.key))
-  const revenue = orders.filter((o) => o.status === 'delivered').reduce((a, o) => a + o.total, 0)
+  const revenue = orders.filter((o) => o.status === 'completed').reduce((a, o) => a + o.total, 0)
   const published = products.filter((p) => p.is_active).length
 
   const stats = [
     { label: 'New orders', value: pending.length, note: 'waiting for you to confirm', to: '/admin/orders?status=pending', tone: pending.length ? 'warn' : '' },
     { label: 'Orders today', value: todays.length, note: `${active.length} active in total`, to: '/admin/orders' },
     { label: 'Deposits to collect', value: money(awaitingDeposit.reduce((a, o) => a + o.deposit_amount, 0)), note: `${awaitingDeposit.length} orders`, to: '/admin/orders' },
-    { label: 'To deliver', value: toDeliver.length, note: 'deposit received', to: '/admin/orders?status=deposit_paid' },
-    { label: 'Delivered value', value: money(revenue), note: 'completed orders', to: '/admin/orders?status=delivered' },
+    { label: 'In progress', value: toDeliver.length, note: 'being prepared or delivered', to: '/admin/orders?status=processing' },
+    { label: 'Completed value', value: money(revenue), note: 'completed orders', to: '/admin/orders?status=completed' },
     { label: 'Products live', value: published, note: `${products.length - published} hidden, ${categories.length} categories`, to: '/admin/products' },
   ]
 

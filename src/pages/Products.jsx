@@ -91,7 +91,7 @@ function FilterPanel({ f, set, categories, counts, sizes, onReset, activeCount }
   )
 }
 
-export default function Shop() {
+export default function Products() {
   const { products, categories, catById, catBySlug, loading, error } = useStore()
   const [params, setParams] = useSearchParams()
   const [sheet, setSheet] = useState(false)
@@ -148,9 +148,9 @@ export default function Shop() {
   )
 
   return (
-    <div className="wrap shop">
+    <div className="wrap catalog">
       <nav className="crumbs" aria-label="Breadcrumb">
-        <Link to="/">Home</Link> <Icon name="right" size={14} /> <Link to="/shop">Shop</Link>
+        <Link to="/">Home</Link> <Icon name="right" size={14} /> <Link to="/products">Products</Link>
         {cat && (
           <>
             <Icon name="right" size={14} /> <span>{cat.name}</span>
@@ -158,18 +158,18 @@ export default function Shop() {
         )}
       </nav>
 
-      <div className="shop-head">
+      <div className="catalog-head">
         <div>
           <h1>{title}</h1>
           {cat?.description && !f.q && <p className="muted">{cat.description}</p>}
         </div>
       </div>
 
-      <div className="shop-layout">
-        <aside className="shop-side" aria-label="Filters">{panel}</aside>
+      <div className="catalog-layout">
+        <aside className="catalog-side" aria-label="Filters">{panel}</aside>
 
-        <div className="shop-main">
-          <div className="shop-toolbar">
+        <div className="catalog-main">
+          <div className="catalog-toolbar">
             <button className="btn btn-outline filterbtn" onClick={() => setSheet(true)}>
               <Icon name="filter" size={18} /> Filters{filterCount > 0 && <span className="badge-n">{filterCount}</span>}
             </button>

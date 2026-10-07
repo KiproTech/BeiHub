@@ -13,6 +13,7 @@
     "generate:sql": "node scripts/build-sql.mjs"
   },
   "dependencies": {
+    "@supabase/realtime-js": "^2.117.2",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },

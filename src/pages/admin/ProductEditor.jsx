@@ -5,7 +5,7 @@ import { Modal, ProductImage } from '../../components/ui.jsx'
 import { Card, Field, KeyValueEditor, PageHead, Toggle, confirmDelete } from './parts.jsx'
 import { useAdmin } from './AdminContext.jsx'
 import { api } from '../../lib/api.js'
-import { discountPercent, money, slugify } from '../../lib/format.js'
+import { PRODUCT_STATUSES, discountPercent, money, slugify } from '../../lib/format.js'
 
 /* ------------------------------ images ------------------------------ */
 function ImageManager({ product }) {
@@ -204,7 +204,8 @@ export default function ProductEditor({ id }) {
   const product = id ? products.find((p) => p.id === id) : null
   const [f, setF] = useState(() => ({
     name: '', slug: '', category_id: categories[0]?.id || '', brand: '', short_description: '', description: '', specs: {},
-    is_active: true, is_featured: false, is_popular: false, is_new: false, ...(product || {}),
+    status: 'available',
+    is_featured: false, is_popular: false, is_new: false, ...(product || {}),
   }))
   const [slugTouched, setSlugTouched] = useState(!!product)
   const [busy, setBusy] = useState(false)
@@ -225,7 +226,7 @@ export default function ProductEditor({ id }) {
     const payload = {
       id: product?.id, category_id: f.category_id, name: f.name.trim(), slug: f.slug || slugify(f.name), brand: f.brand?.trim() || null,
       short_description: f.short_description?.trim() || null, description: f.description?.trim() || null, specs: f.specs || {},
-      is_active: f.is_active, is_featured: f.is_featured, is_popular: f.is_popular, is_new: f.is_new,
+      status: f.status, is_featured: f.is_featured, is_popular: f.is_popular, is_new: f.is_new,
     }
     const saved = await run(() => api.saveProduct(payload), product ? 'Product saved' : 'Product created. Now add images and variants.')
     setBusy(false)
@@ -258,13 +259,17 @@ export default function ProductEditor({ id }) {
               {categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
             </select>
           </Field>
+          <Field label="Availability status" hint="Out of stock products stay visible but cannot be ordered. Hidden and discontinued products are not shown to customers.">
+            <select value={f.status} onChange={(e) => set('status', e.target.value)}>
+              {PRODUCT_STATUSES.map((st) => <option key={st.key} value={st.key}>{st.label}</option>)}
+            </select>
+          </Field>
           <Field label="Brand (optional)"><input value={f.brand || ''} onChange={(e) => set('brand', e.target.value)} /></Field>
           <Field label="Web address (slug)" hint="Used in the product link."><input value={f.slug} onChange={(e) => { setSlugTouched(true); set('slug', slugify(e.target.value)) }} /></Field>
           <Field label="Short description" className="span2" hint="One line shown under the product name."><input value={f.short_description || ''} onChange={(e) => set('short_description', e.target.value)} maxLength={200} /></Field>
           <Field label="Full description" className="span2"><textarea rows={6} value={f.description || ''} onChange={(e) => set('description', e.target.value)} /></Field>
         </div>
         <div className="toggles">
-          <Toggle checked={f.is_active} onChange={(v) => set('is_active', v)} label="Live on website" />
           <Toggle checked={f.is_featured} onChange={(v) => set('is_featured', v)} label="Featured" />
           <Toggle checked={f.is_popular} onChange={(v) => set('is_popular', v)} label="Popular" />
           <Toggle checked={f.is_new} onChange={(v) => set('is_new', v)} label="Mark as new" />

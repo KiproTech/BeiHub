@@ -11,7 +11,7 @@ import { waLink } from '../lib/whatsapp.js'
 const WHY = [
   { icon: 'shield', title: 'Quality products', text: 'We list products we are confident to stand behind, with clear specifications so you know what you are buying.' },
   { icon: 'tag', title: 'Competitive prices', text: 'Prices are shown upfront in Kenya Shillings. When we run offers, the old price and your saving are shown.' },
-  { icon: 'list', title: 'Convenient ordering', text: 'Build an Order List from your phone, add your delivery details and send it. No account and no online payment needed.' },
+  { icon: 'list', title: 'Convenient ordering', text: 'Browse freely, build an Order List from your phone, then log in to confirm your details and submit. No online payment needed.' },
   { icon: 'truck', title: 'Delivery options', text: 'We deliver to your location. The delivery fee is shown before you submit, based on where you are.' },
   { icon: 'headset', title: 'Customer support', text: 'Call or WhatsApp us before or after you order. A real person confirms every order.' },
 ]
@@ -19,23 +19,23 @@ const STEPS = [
   { t: 'Browse', d: 'Explore categories or search for what you need.' },
   { t: 'Choose a product', d: 'Pick the size or option and check the price.' },
   { t: 'Add to Order List', d: 'Add everything you want and change quantities.' },
-  { t: 'Submit your order', d: 'Enter your delivery details and send the order.' },
-  { t: 'Confirm with deposit', d: 'We contact you to confirm and share deposit details.' },
+  { t: 'Log in and submit', d: 'Create a free account, verify your email and confirm your contact details.' },
+  { t: 'We confirm with you', d: 'Your order is pending until we contact you. A deposit of up to {pct}% may be required.' },
   { t: 'Receive and pay balance', d: 'We deliver, and you pay the remaining balance.' },
 ]
 
-function Hero({ settings, rows }) {
+function Hero({ settings, rows, image }) {
   const wa = settings.whatsapp
   return (
     <section className="hero">
       <div className="wrap hero-in">
         <div className="hero-copy">
-          <h1>Quality Products. Better Prices. Delivered.</h1>
+          <h1>{settings.tagline || settings.business_name}</h1>
           <p className="hero-sub">
-            Discover water tanks, TVs, fridges, solar and security equipment. Compare prices, build your Order List and place your order from anywhere in Kenya.
+            {settings.business_name} is one store that sells quality products and delivers them to you. Browse our products and prices, build your Order List and place your order from your phone.
           </p>
           <div className="hero-cta">
-            <Link to="/shop" className="btn btn-primary btn-lg">Shop Products</Link>
+            <Link to="/products" className="btn btn-primary btn-lg">Browse Products</Link>
             {wa && (
               <a href={waLink(wa, `Hello ${settings.business_name}, I would like to place an order.`)} target="_blank" rel="noreferrer" className="btn btn-wa btn-lg">
                 <WhatsAppIcon size={20} /> Order via WhatsApp
@@ -44,12 +44,12 @@ function Hero({ settings, rows }) {
           </div>
           <ul className="hero-points">
             <li><Icon name="check" size={18} /> No online payment needed</li>
-            <li><Icon name="check" size={18} /> {settings.deposit_percent}% deposit, balance on delivery</li>
+            {settings.deposit_percent != null && <li><Icon name="check" size={18} /> {settings.deposit_percent}% deposit, balance on delivery</li>}
             <li><Icon name="check" size={18} /> Delivery to your location</li>
           </ul>
         </div>
         <div className="hero-art">
-          <img src="/brand/hero.svg" alt="Water tank, refrigerator, television, solar panel and laptop" width="900" height="640" />
+          <img src={image || '/brand/hero.svg'} alt={image ? settings.business_name : 'Water tank, refrigerator, television, solar panel and laptop'} width="900" height="640" />
           {rows.map((r, i) => (
             <Link key={r.product.id} to={`/product/${r.product.slug}?v=${r.variant.id}`} className={`hero-tag hero-tag-${i + 1}`}>
               <span className="hero-tag-name">{variantTitle(r.product, r.variant)}</span>
@@ -64,7 +64,7 @@ function Hero({ settings, rows }) {
 }
 
 export default function Home() {
-  const { settings, categories, products, loading, error, reload } = useStore()
+  const { settings, categories, products, media, mediaList, loading, error, reload } = useStore()
 
   const sections = useMemo(() => {
     const newest = [...products].sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
@@ -88,18 +88,25 @@ export default function Home() {
     }
   }, [products, categories])
 
+  const pct = settings.deposit_percent ?? 0
   const example = 28000
-  const dep = round2((example * settings.deposit_percent) / 100)
+  const dep = round2((example * pct) / 100)
 
   return (
     <>
-      <Hero settings={settings} rows={sections.heroRows} />
+      <Hero settings={settings} rows={sections.heroRows} image={media.hero?.url} />
+
+      {mediaList('banner').length > 0 && (
+        <section className="promos wrap" aria-label="Promotions">
+          {mediaList('banner').map((b) => <img key={b.id} src={b.url} alt={b.alt || b.title || 'Promotion'} loading="lazy" />)}
+        </section>
+      )}
 
       <div className="truststrip">
         <div className="wrap truststrip-in">
           <span><Icon name="shield" size={20} /> Clear prices in KSh</span>
           <span><Icon name="truck" size={20} /> Delivery to your door</span>
-          <span><Icon name="wallet" size={20} /> {settings.deposit_percent}% deposit, {100 - settings.deposit_percent}% on delivery</span>
+          {settings.deposit_percent != null && <span><Icon name="wallet" size={20} /> Deposit of up to {settings.deposit_percent}% may be required</span>}
           <span><Icon name="headset" size={20} /> Call or WhatsApp support</span>
         </div>
       </div>
@@ -115,10 +122,10 @@ export default function Home() {
 
       <section className="section" id="categories">
         <div className="wrap">
-          <SectionHead title="Shop by category" sub="Everything for your home, shop, farm or office." to="/shop" linkText="All products" />
+          <SectionHead title="Browse by category" sub="Find what you need, with prices and availability." to="/categories" linkText="All categories" />
           <div className="catgrid">
             {categories.map((c) => (
-              <Link key={c.id} to={`/shop?category=${c.slug}`} className="catcard">
+              <Link key={c.id} to={`/products?category=${c.slug}`} className="catcard">
                 <span className="catcard-img"><ProductImage src={c.image_url} alt="" /></span>
                 <span className="catcard-name">{c.name}</span>
                 <span className="catcard-count">{sections.counts[c.id] || 0} products</span>
@@ -128,10 +135,10 @@ export default function Home() {
         </div>
       </section>
 
-      <ProductRow id="featured" title="Featured products" sub="Hand-picked by our team." to="/shop" rows={sections.featured} />
-      <ProductRow id="offers" title="Special offers" sub="Reduced prices. See what you save." to="/shop?sale=1&sort=discount" rows={sections.offers} />
-      <ProductRow id="popular" title="Popular products" sub="What most customers are ordering." to="/shop" rows={sections.popular} />
-      <ProductRow id="new" title="New arrivals" sub="Recently added to the catalogue." to="/shop?sort=newest" rows={sections.newArr} />
+      <ProductRow id="featured" title="Featured products" sub="Hand-picked by our team." to="/products" rows={sections.featured} />
+      <ProductRow id="offers" title="Special offers" sub="Reduced prices. See what you save." to="/products?sale=1&sort=discount" rows={sections.offers} />
+      <ProductRow id="popular" title="Popular products" sub="What most customers are ordering." to="/products" rows={sections.popular} />
+      <ProductRow id="new" title="New arrivals" sub="Recently added to the catalogue." to="/products?sort=newest" rows={sections.newArr} />
 
       <section className="section section-tint" id="why">
         <div className="wrap">
@@ -156,7 +163,7 @@ export default function Home() {
               <li key={s.t}>
                 <span className="steps-n">{i + 1}</span>
                 <h3>{s.t}</h3>
-                <p>{s.d}</p>
+                <p>{s.d.replace('{pct}', pct)}</p>
               </li>
             ))}
           </ol>
@@ -169,18 +176,18 @@ export default function Home() {
             <div className="payterms-copy">
               <h2>Simple payment terms</h2>
               <p>
-                There is no online payment on this website. You send your order, we confirm it with you, and you pay in two parts.
+                There is no online payment on this website. You submit your order, our team contacts you to confirm it, and a deposit of up to the percentage shown may be required before we proceed.
               </p>
               <p className="muted">{settings.payment_instructions}</p>
             </div>
             <div className="payterms-tags" aria-label="Payment example">
               <div className="paytag paytag-a">
-                <span className="paytag-pct">{settings.deposit_percent}%</span>
+                <span className="paytag-pct">{pct}%</span>
                 <span className="paytag-what">Deposit</span>
                 <span className="paytag-note">Paid to confirm your order</span>
               </div>
               <div className="paytag paytag-b">
-                <span className="paytag-pct">{100 - settings.deposit_percent}%</span>
+                <span className="paytag-pct">{100 - pct}%</span>
                 <span className="paytag-what">Balance</span>
                 <span className="paytag-note">Paid when your order is delivered</span>
               </div>
