@@ -68,7 +68,11 @@ export default function Home() {
 
   const sections = useMemo(() => {
     const newest = [...products].sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
-    const rowOf = (p, v) => ({ product: p, variantId: (v || cheapestVariant(p)).id })
+    // a row needs a real variant to be orderable; anything else is skipped instead of crashing the page
+    const rowOf = (p, v) => {
+      const variant = v || cheapestVariant(p)
+      return variant?.id ? { product: p, variantId: variant.id } : null
+    }
     const featured = products.filter((p) => p.is_featured)
     const popular = products.filter((p) => p.is_popular)
     const flaggedNew = newest.filter((p) => p.is_new)
@@ -79,10 +83,10 @@ export default function Home() {
     const saving = (x) => x.v.previous_price - x.v.price
     const heroRows = [...offers].filter((x) => x.p.is_featured || x.p.is_popular).sort((a, b) => saving(b) - saving(a)).slice(0, 3).map(({ p, v }) => ({ product: p, variant: v }))
     return {
-      featured: (featured.length ? featured : newest.slice(0, 4)).slice(0, 8).map((p) => rowOf(p)),
-      popular: popular.slice(0, 8).map((p) => rowOf(p)),
-      newArr: newArr.map((p) => rowOf(p)),
-      offers: offers.slice(0, 8).map(({ p, v }) => rowOf(p, v)),
+      featured: (featured.length ? featured : newest.slice(0, 4)).slice(0, 8).map((p) => rowOf(p)).filter(Boolean),
+      popular: popular.slice(0, 8).map((p) => rowOf(p)).filter(Boolean),
+      newArr: newArr.map((p) => rowOf(p)).filter(Boolean),
+      offers: offers.slice(0, 8).map(({ p, v }) => rowOf(p, v)).filter(Boolean),
       heroRows,
       counts: Object.fromEntries(categories.map((c) => [c.id, products.filter((p) => p.category_id === c.id).length])),
     }

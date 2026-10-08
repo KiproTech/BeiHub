@@ -54,7 +54,9 @@ export const supabaseBackend = {
       categories,
       locations,
       media,
-      products: products.map(shapeProduct),
+      // A product with no variant has no price and cannot be ordered, so customers never see it
+      // (the admin still does, and sees "No variants" until one is added).
+      products: products.map(shapeProduct).filter((p) => p.variants.length > 0),
     }
   },
 

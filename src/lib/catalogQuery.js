@@ -19,7 +19,7 @@ export const productImages = (p) => {
 const orderable = (v) => availability(v).canOrder
 const byPrice = (a, b) => Number(orderable(b)) - Number(orderable(a)) || a.price - b.price
 
-export const cheapestVariant = (p) => [...p.variants].sort(byPrice)[0]
+export const cheapestVariant = (p) => [...p.variants].sort(byPrice)[0] || { id: null, price: 0, previous_price: null }
 export const priceRange = (p) => {
   const prices = p.variants.map((v) => v.price)
   return { min: Math.min(...prices), max: Math.max(...prices) }
