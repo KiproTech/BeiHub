@@ -1,5 +1,30 @@
 # Changes
 
+## Roles, permissions, Super Admin and independent tab sessions (this release)
+
+**Sessions**
+- Login is now per browser tab (`sessionStorage`), not one shared `localStorage` key: Super Admin, customer and a second admin can be signed in side by side without affecting each other.
+- Logout ends only that tab's session (`scope=local`; the old call signed the user out everywhere). A dropped connection no longer logs you out. Duplicated tabs start logged out so they never share a refresh token.
+
+**Access control (database enforced)**
+- Roles `super_admin` / `admin` / `customer` in `profiles.role`, a permission catalogue (13 permissions) and per-admin grants. RLS, storage rules and every admin function now check the matching permission instead of "is any admin".
+- Security hole closed: any admin could previously rewrite any profile, including roles. Roles and account status now change only through audited functions.
+- The Super Admin is identified in the database and promoted only after the e-mail is verified; there can only be one; nobody else can change or remove them; deliberate ownership transfer.
+- Existing admins keep everything they could do before, except managing administrators.
+
+**Administrators**
+- Super Admin > Administrators: list, invite, edit permissions, suspend / reactivate, revoke, view activity, invitations (pending / accepted / expired / revoked, resend, revoke).
+- Secure invitations: one-time token (only its hash is stored), 7-day expiry, verified-e-mail + token required to accept, normal registration can never become admin.
+
+**Customers and visibility**
+- Customers: search, filters, status, verification, last login, order count and value, full order history, suspend / reactivate.
+- Dashboard figures per permission; audit log is append-only (no edit / delete, not even by the Super Admin) and records actor, role, description and old / new values.
+- Login and logout times recorded.
+
+**Database:** see `supabase/beihub_migration.sql`.
+
+---
+
 ## Single business + one source of truth (this release)
 
 **Synchronisation**

@@ -1,577 +1,613 @@
 -- =====================================================================
---  beihub_migration.sql   -   BeiHub "single business" upgrade
+--  beihub_migration.sql   -   BeiHub roles, permissions and admin management
 --
---  BeiHub is ONE business, not a marketplace. This migration:
---    1. makes Supabase the single source of truth for business information
---       (validated on the server, not only in the browser)
---    2. removes the multi-shop marketplace concept from the database
---       (data is migrated / archived, never blindly deleted)
---    3. adds predefined cancellation reasons and predefined customer updates
---    4. turns on Supabase Realtime for the shared tables
---    5. re-states every RLS / storage policy so ONLY the admin can write
+--  Adds, on top of the single-business database:
+--    1. three roles: super_admin / admin / customer (always read from the database)
+--    2. a permission catalogue + per-admin permissions, enforced by RLS and by the RPCs
+--    3. a Super Admin that is identified in the DATABASE (never in the React code)
+--    4. secure, expiring, one-time admin invitations
+--    5. Super Admin tools: administrators, customers + their orders, dashboard figures
+--    6. a tamper-proof audit log (actor, role, description, old / new values)
+--    7. login / logout tracking
 --
 --  RUN ORDER (Supabase Dashboard > SQL Editor)
---    1. supabase/BeiHub_database.sql                     original schema + sample data
---    2. supabase/archive/01_marketplace_upgrade.sql      the previous upgrade (shops, orders, audit ...)
---    3. supabase/beihub_migration.sql                    THIS FILE
---  If steps 1 and 2 were already run on your project, run ONLY this file.
+--    1. supabase/BeiHub_database.sql
+--    2. supabase/archive/01_marketplace_upgrade.sql
+--    3. supabase/archive/02_single_business_upgrade.sql
+--    4. supabase/beihub_migration.sql                     THIS FILE
+--  If steps 1-3 were already run on your project, run ONLY this file.
 --
---  SAFE TO RE-RUN: every statement is idempotent. Existing rows are kept.
---
---  WHAT IS REUSED (nothing duplicated)
---    store_settings is still THE business-information record (id = 1).
---    products / variants / images / categories / orders / order_items /
---    order_events / notifications / site_media / audit_log / delivery_locations.
---
---  WHAT IS NEW
---    order_cancellation_reasons, order_update_templates (+ 2 RPCs),
---    store_settings.delivery_info, orders.cancellation_reason_code.
+--  SAFE TO RE-RUN. Existing data is kept. Existing admins keep everything they could do
+--  before, except managing other administrators (that is Super Admin only unless granted).
 --
 --  AFTER RUNNING (cannot be done in SQL)
---    Authentication > Providers > Email > "Confirm email" ON
---    Authentication > URL Configuration > Site URL + Redirect URLs
---    Database > Replication: confirm the tables listed in section 6 show as enabled
+--    Authentication > Providers > Email: "Confirm email" ON
+--    Authentication > URL Configuration: Site URL + Redirect URLs (see README)
+--    Authentication > Email Templates > "Magic Link": reword it as the admin invitation (see README)
+--    Authentication > SMTP: use your own SMTP provider (the built-in sender is limited to a few mails per hour)
 -- =====================================================================
 
 do $$
 begin
-  if to_regclass('public.order_events') is null or to_regclass('public.site_media') is null then
-    raise exception 'Run supabase/BeiHub_database.sql and supabase/archive/01_marketplace_upgrade.sql before this file.';
+  if to_regclass('public.order_cancellation_reasons') is null then
+    raise exception 'Run BeiHub_database.sql, archive/01_marketplace_upgrade.sql and archive/02_single_business_upgrade.sql before this file.';
   end if;
 end $$;
 
 
 -- ---------------------------------------------------------------------
--- 1. BUSINESS INFORMATION  (store_settings = the one and only record)
+-- 1. ROLES + extra profile columns
+--    profiles.role is the ONE place a role lives. The browser never decides it.
 -- ---------------------------------------------------------------------
-alter table public.store_settings
-  add column if not exists delivery_info text;
+alter table public.profiles drop constraint if exists profiles_role_check;
+alter table public.profiles add constraint profiles_role_check check (role in ('customer', 'admin', 'super_admin'));
 
--- Server-side validation + clean-up. The browser validates too, but the database is the authority:
--- whatever the admin saves is trimmed, checked, and then identical for every visitor.
-create or replace function public.store_settings_normalize()
-returns trigger
-language plpgsql
-set search_path = public
-as $$
-declare
-  v_phone_re text := '^\+?[0-9][0-9 ()\-]{5,24}$';
-  v_email_re text := '^[^@\s]+@[^@\s]+\.[^@\s]+$';
-  v_url_re   text := '^https?://[^\s]+$';
+alter table public.profiles
+  add column if not exists last_login_at  timestamptz,
+  add column if not exists last_logout_at timestamptz,
+  add column if not exists suspended_at   timestamptz,
+  add column if not exists suspended_by   uuid references auth.users (id) on delete set null,
+  add column if not exists admin_since    timestamptz,
+  add column if not exists invited_by     uuid references auth.users (id) on delete set null;
+
+-- there can only ever be ONE super admin (ownership moves only through transfer_super_admin())
+create unique index if not exists profiles_single_super_admin on public.profiles ((true)) where role = 'super_admin';
+create index if not exists profiles_role_idx on public.profiles (role);
+
+
+-- ---------------------------------------------------------------------
+-- 2. PERMISSIONS
+-- ---------------------------------------------------------------------
+create table if not exists public.permissions (
+  code        text primary key check (code ~ '^[A-Z_]+$'),
+  label       text not null,
+  description text,
+  sort_order  integer not null default 0,
+  restricted  boolean not null default false     -- only the Super Admin may grant a restricted permission
+);
+
+insert into public.permissions (code, label, description, sort_order, restricted) values
+  ('MANAGE_PRODUCTS',          'Manage products',         'Create, edit, hide and delete products, variants and categories.',                10, false),
+  ('MANAGE_PRODUCT_PRICES',    'Manage prices',           'Change product prices and previous (struck-through) prices.',                     20, false),
+  ('MANAGE_PRODUCT_IMAGES',    'Manage product images',   'Upload, replace and delete product pictures.',                                    30, false),
+  ('MANAGE_ORDERS',            'Manage orders',           'See orders, add notes, update payment status and send updates.',                  40, false),
+  ('UPDATE_ORDER_STATUS',      'Update order status',     'Move an order forward (confirmed, processing, ready, completed ...).',            50, false),
+  ('CANCEL_ORDERS',            'Cancel orders',           'Cancel an order with a predefined reason.',                                       60, false),
+  ('MANAGE_CUSTOMERS',         'Manage customers',        'See customers and their order history; suspend or reactivate customer accounts.', 70, false),
+  ('MANAGE_BUSINESS_SETTINGS', 'Manage business settings','Contact details, opening hours, delivery information, delivery fees.',            80, false),
+  ('MANAGE_MEDIA',             'Manage media',            'Logo, banners, favicon and other website pictures.',                              90, false),
+  ('VIEW_REPORTS',             'View reports',            'See dashboard figures and order totals.',                                         100, false),
+  ('VIEW_AUDIT_LOGS',          'View audit logs',         'Read the record of administrator actions.',                                       110, false),
+  ('MANAGE_NOTIFICATIONS',     'Manage notifications',    'Send updates and messages to customers.',                                         120, false),
+  ('MANAGE_ADMINS',            'Manage administrators',   'Invite, suspend and change permissions of other administrators.',                 130, true)
+on conflict (code) do update set label = excluded.label, description = excluded.description,
+                                 sort_order = excluded.sort_order, restricted = excluded.restricted;
+
+create table if not exists public.admin_permissions (
+  user_id    uuid not null references public.profiles (id) on delete cascade,
+  permission text not null references public.permissions (code) on update cascade on delete cascade,
+  granted_by uuid references auth.users (id) on delete set null,
+  granted_at timestamptz not null default now(),
+  primary key (user_id, permission)
+);
+create index if not exists admin_permissions_perm_idx on public.admin_permissions (permission);
+
+
+-- ---------------------------------------------------------------------
+-- 3. ROLE / PERMISSION HELPERS  (SECURITY DEFINER: they read profiles without recursion)
+-- ---------------------------------------------------------------------
+create or replace function public.is_admin()                    -- "is staff": admin OR super admin, account active
+returns boolean language sql stable security definer set search_path = public as $$
+  select exists (select 1 from public.profiles p
+                  where p.id = auth.uid() and p.role in ('admin', 'super_admin') and not p.is_suspended);
+$$;
+
+create or replace function public.is_super_admin()
+returns boolean language sql stable security definer set search_path = public as $$
+  select exists (select 1 from public.profiles p
+                  where p.id = auth.uid() and p.role = 'super_admin' and not p.is_suspended);
+$$;
+
+create or replace function public.has_permission(p_permission text)
+returns boolean language sql stable security definer set search_path = public as $$
+  select exists (
+    select 1 from public.profiles p
+     where p.id = auth.uid() and not p.is_suspended
+       and (p.role = 'super_admin'
+            or (p.role = 'admin' and exists (select 1 from public.admin_permissions ap
+                                              where ap.user_id = p.id and ap.permission = p_permission)))
+  );
+$$;
+
+create or replace function public.has_any_permission(p_permissions text[])
+returns boolean language sql stable security definer set search_path = public as $$
+  select exists (
+    select 1 from public.profiles p
+     where p.id = auth.uid() and not p.is_suspended
+       and (p.role = 'super_admin'
+            or (p.role = 'admin' and exists (select 1 from public.admin_permissions ap
+                                              where ap.user_id = p.id and ap.permission = any (p_permissions))))
+  );
+$$;
+
+-- who may see orders at all (customers always see their own through a separate policy)
+create or replace function public.can_view_orders()
+returns boolean language sql stable security definer set search_path = public as $$
+  select public.has_any_permission(array['MANAGE_ORDERS', 'UPDATE_ORDER_STATUS', 'CANCEL_ORDERS', 'MANAGE_CUSTOMERS', 'VIEW_REPORTS']);
+$$;
+
+-- the browser asks "what am I?" - the answer is ONLY used to decide what to show; every request is re-checked by RLS
+create or replace function public.my_access()
+returns jsonb language sql stable security definer set search_path = public as $$
+  select jsonb_build_object(
+           'role', p.role,
+           'suspended', p.is_suspended,
+           'permissions', case
+             when p.is_suspended then '[]'::jsonb
+             when p.role = 'super_admin' then coalesce((select jsonb_agg(c.code order by c.sort_order) from public.permissions c), '[]'::jsonb)
+             when p.role = 'admin' then coalesce((select jsonb_agg(ap.permission order by ap.permission) from public.admin_permissions ap where ap.user_id = p.id), '[]'::jsonb)
+             else '[]'::jsonb end)
+    from public.profiles p where p.id = auth.uid();
+$$;
+
+grant execute on function public.is_admin(), public.is_super_admin(), public.has_permission(text),
+                          public.has_any_permission(text[]), public.can_view_orders(), public.my_access()
+  to anon, authenticated;
+
+
+-- ---------------------------------------------------------------------
+-- 4. THE SUPER ADMIN LIVES IN THE DATABASE
+--    The e-mail below is promoted to super_admin automatically - but ONLY once Supabase has
+--    VERIFIED that address (email_confirmed_at). Nobody can get the role by registering with it.
+--    The table has no policies and no grants: only the functions below can read it.
+-- ---------------------------------------------------------------------
+create table if not exists public.super_admin_bootstrap (
+  email      text primary key check (email = lower(email)),
+  created_at timestamptz not null default now()
+);
+alter table public.super_admin_bootstrap enable row level security;
+revoke all on public.super_admin_bootstrap from anon, authenticated;
+
+insert into public.super_admin_bootstrap (email) values ('akiprotichamos@gmail.com') on conflict do nothing;
+
+create or replace function public._promote_bootstrap(p_user uuid, p_email text, p_confirmed timestamptz)
+returns void language plpgsql security definer set search_path = public as $$
 begin
-  new.business_name        := btrim(coalesce(new.business_name, ''));
-  new.tagline              := nullif(btrim(new.tagline), '');
-  new.phone                := nullif(btrim(new.phone), '');
-  new.whatsapp             := nullif(regexp_replace(coalesce(new.whatsapp, ''), '\D', '', 'g'), '');   -- digits only, e.g. 254712345678
-  new.email                := lower(nullif(btrim(new.email), ''));
-  new.address              := nullif(btrim(new.address), '');
-  new.county               := nullif(btrim(new.county), '');
-  new.business_hours       := nullif(btrim(new.business_hours), '');
-  new.about                := nullif(btrim(new.about), '');
-  new.delivery_info        := nullif(btrim(new.delivery_info), '');
-  new.payment_instructions := nullif(btrim(new.payment_instructions), '');
-  new.support_phone        := nullif(btrim(new.support_phone), '');
-  new.support_email        := lower(nullif(btrim(new.support_email), ''));
-  new.support_hours        := nullif(btrim(new.support_hours), '');
-  new.other_contact_info   := nullif(btrim(new.other_contact_info), '');
-  new.google_maps_url      := nullif(btrim(new.google_maps_url), '');
-  new.facebook_url         := nullif(btrim(new.facebook_url), '');
-  new.instagram_url        := nullif(btrim(new.instagram_url), '');
-  new.twitter_url          := nullif(btrim(new.twitter_url), '');
-  new.tiktok_url           := nullif(btrim(new.tiktok_url), '');
-  new.youtube_url          := nullif(btrim(new.youtube_url), '');
+  if p_confirmed is not null
+     and exists (select 1 from public.super_admin_bootstrap b where b.email = lower(p_email))
+     and not exists (select 1 from public.profiles where role = 'super_admin' and id <> p_user) then
+    perform set_config('beihub.rbac_rpc', 'on', true);
+    update public.profiles set role = 'super_admin', admin_since = coalesce(admin_since, now())
+     where id = p_user and role <> 'super_admin';
+  end if;
+end;
+$$;
+revoke all on function public._promote_bootstrap(uuid, text, timestamptz) from public, anon, authenticated;
 
-  if char_length(new.business_name) not between 1 and 120 then
-    raise exception 'Enter your business name (1 to 120 characters).' using errcode = '22023';
-  end if;
+create or replace function public.handle_new_user()
+returns trigger language plpgsql security definer set search_path = public as $$
+begin
+  insert into public.profiles (id, full_name, phone)
+  values (new.id, coalesce(new.raw_user_meta_data ->> 'full_name', ''),
+          coalesce(nullif(new.raw_user_meta_data ->> 'phone', ''), new.phone))
+  on conflict (id) do nothing;
+  perform public._promote_bootstrap(new.id, new.email, new.email_confirmed_at);
+  return new;
+end;
+$$;
 
-  -- Only fields that actually change are validated, so old data never blocks an unrelated save.
-  if tg_op = 'INSERT' or new.phone is distinct from old.phone then
-    if new.phone is not null and new.phone !~ v_phone_re then
-      raise exception 'The business phone number looks invalid. Use digits, spaces, + ( ) or -.' using errcode = '22023';
-    end if;
+create or replace function public.promote_on_email_confirmed()
+returns trigger language plpgsql security definer set search_path = public as $$
+begin
+  perform public._promote_bootstrap(new.id, new.email, new.email_confirmed_at);
+  return new;
+end;
+$$;
+drop trigger if exists on_auth_user_email_confirmed on auth.users;
+create trigger on_auth_user_email_confirmed
+  after update of email_confirmed_at, email on auth.users
+  for each row execute function public.promote_on_email_confirmed();
+
+-- promote the owner if the account already exists and is verified
+select public._promote_bootstrap(u.id, u.email, u.email_confirmed_at)
+  from auth.users u where lower(u.email) in (select email from public.super_admin_bootstrap);
+
+-- existing admins keep everything they could do before (except managing other administrators)
+insert into public.admin_permissions (user_id, permission)
+select p.id, c.code from public.profiles p cross join public.permissions c
+ where p.role = 'admin' and c.code <> 'MANAGE_ADMINS'
+on conflict do nothing;
+
+
+-- ---------------------------------------------------------------------
+-- 5. NOBODY CAN EDIT ROLES OR ACCOUNT STATUS DIRECTLY
+--    Before: any admin could UPDATE any profile (including role) through the API.
+--    Now: role / suspension / login columns can only change inside the audited functions below
+--    (they set beihub.rbac_rpc, which a browser cannot do), not even for the Super Admin.
+-- ---------------------------------------------------------------------
+create or replace function public.protect_profile_role()
+returns trigger language plpgsql security definer set search_path = public as $$
+begin
+  if coalesce(current_setting('beihub.rbac_rpc', true), '') = 'on' then
+    return new;
   end if;
-  if tg_op = 'INSERT' or new.support_phone is distinct from old.support_phone then
-    if new.support_phone is not null and new.support_phone !~ v_phone_re then
-      raise exception 'The support phone number looks invalid. Use digits, spaces, + ( ) or -.' using errcode = '22023';
-    end if;
-  end if;
-  if tg_op = 'INSERT' or new.whatsapp is distinct from old.whatsapp then
-    if new.whatsapp is not null and new.whatsapp !~ '^[0-9]{9,15}$' then
-      raise exception 'The WhatsApp number must have 9 to 15 digits (for example 254712345678).' using errcode = '22023';
-    end if;
-  end if;
-  if tg_op = 'INSERT' or new.email is distinct from old.email then
-    if new.email is not null and new.email !~ v_email_re then
-      raise exception 'The business email address looks invalid.' using errcode = '22023';
-    end if;
-  end if;
-  if tg_op = 'INSERT' or new.support_email is distinct from old.support_email then
-    if new.support_email is not null and new.support_email !~ v_email_re then
-      raise exception 'The support email address looks invalid.' using errcode = '22023';
-    end if;
-  end if;
-  -- explicit per-column checks (a NOT IN over NULLs would silently skip the test)
-  if (tg_op = 'INSERT' or new.google_maps_url is distinct from old.google_maps_url) and new.google_maps_url is not null and new.google_maps_url !~ v_url_re then
-    raise exception 'Links must start with http:// or https://  (map link).' using errcode = '22023';
-  end if;
-  if (tg_op = 'INSERT' or new.facebook_url is distinct from old.facebook_url) and new.facebook_url is not null and new.facebook_url !~ v_url_re then
-    raise exception 'Links must start with http:// or https://  (Facebook).' using errcode = '22023';
-  end if;
-  if (tg_op = 'INSERT' or new.instagram_url is distinct from old.instagram_url) and new.instagram_url is not null and new.instagram_url !~ v_url_re then
-    raise exception 'Links must start with http:// or https://  (Instagram).' using errcode = '22023';
-  end if;
-  if (tg_op = 'INSERT' or new.twitter_url is distinct from old.twitter_url) and new.twitter_url is not null and new.twitter_url !~ v_url_re then
-    raise exception 'Links must start with http:// or https://  (X / Twitter).' using errcode = '22023';
-  end if;
-  if (tg_op = 'INSERT' or new.tiktok_url is distinct from old.tiktok_url) and new.tiktok_url is not null and new.tiktok_url !~ v_url_re then
-    raise exception 'Links must start with http:// or https://  (TikTok).' using errcode = '22023';
-  end if;
-  if (tg_op = 'INSERT' or new.youtube_url is distinct from old.youtube_url) and new.youtube_url is not null and new.youtube_url !~ v_url_re then
-    raise exception 'Links must start with http:// or https://  (YouTube).' using errcode = '22023';
+  if auth.uid() is not null and (
+        new.role is distinct from old.role
+     or new.is_suspended is distinct from old.is_suspended
+     or new.suspended_reason is distinct from old.suspended_reason
+     or new.suspended_at is distinct from old.suspended_at
+     or new.suspended_by is distinct from old.suspended_by
+     or new.admin_since is distinct from old.admin_since
+     or new.invited_by is distinct from old.invited_by
+     or new.last_login_at is distinct from old.last_login_at
+     or new.last_logout_at is distinct from old.last_logout_at) then
+    raise exception 'Roles and account status can only be changed through the administrator tools.' using errcode = '42501';
   end if;
   return new;
 end;
 $$;
-drop trigger if exists store_settings_normalize_biu on public.store_settings;
-create trigger store_settings_normalize_biu before insert or update on public.store_settings
-  for each row execute function public.store_settings_normalize();
+drop trigger if exists profiles_protect_role on public.profiles;
+create trigger profiles_protect_role before update on public.profiles
+  for each row execute function public.protect_profile_role();
 
--- Make sure the single record exists (the app can never run without it).
-insert into public.store_settings (id) values (1) on conflict (id) do nothing;
+-- a profile row is created only by handle_new_user(); nobody inserts or deletes profiles through the API
+drop policy if exists "profiles: admin manage" on public.profiles;
+drop policy if exists "profiles: read own or admin" on public.profiles;
+drop policy if exists "profiles: update own" on public.profiles;
+drop policy if exists "profiles: read own or authorised staff" on public.profiles;
+drop policy if exists "profiles: read own or authorised staff" on public.profiles;
+create policy "profiles: read own or authorised staff" on public.profiles
+  for select to authenticated
+  using (id = auth.uid() or public.has_any_permission(array['MANAGE_CUSTOMERS', 'MANAGE_ADMINS']));
+drop policy if exists "profiles: update own" on public.profiles;
+create policy "profiles: update own" on public.profiles
+  for update to authenticated
+  using (id = auth.uid()) with check (id = auth.uid());
+revoke insert, delete on public.profiles from anon, authenticated;
+revoke all on public.profiles from anon;
+
+alter table public.permissions        enable row level security;
+alter table public.admin_permissions  enable row level security;
+revoke all on public.permissions, public.admin_permissions from anon, authenticated;
+grant select on public.permissions, public.admin_permissions to authenticated;
+drop policy if exists "permissions: staff read" on public.permissions;
+drop policy if exists "permissions: staff read" on public.permissions;
+create policy "permissions: staff read" on public.permissions for select to authenticated using (public.is_admin());
+drop policy if exists "admin_permissions: own or admin managers" on public.admin_permissions;
+drop policy if exists "admin_permissions: own or admin managers" on public.admin_permissions;
+create policy "admin_permissions: own or admin managers" on public.admin_permissions
+  for select to authenticated using (user_id = auth.uid() or public.has_permission('MANAGE_ADMINS'));
+-- (no insert / update / delete policy: permissions change only through admin_set_admin_permissions())
 
 
 -- ---------------------------------------------------------------------
--- 2. MARKETPLACE -> SINGLE BUSINESS: keep the useful data
---    If the old default shop holds contact details that the central
---    settings are missing, they are copied across. Settings that are
---    already filled in always win (they are what customers see today).
+-- 6. AUDIT LOG  (who did what, as which role; append-only)
 -- ---------------------------------------------------------------------
-do $$
-begin
-  if to_regclass('public.shops') is not null then
-    update public.store_settings s set
-      phone          = coalesce(nullif(btrim(s.phone), ''),          nullif(btrim(sh.phone), '')),
-      whatsapp       = coalesce(nullif(btrim(s.whatsapp), ''),       nullif(btrim(sh.whatsapp), '')),
-      email          = coalesce(nullif(btrim(s.email), ''),          nullif(btrim(sh.email), '')),
-      address        = coalesce(nullif(btrim(s.address), ''),        nullif(btrim(sh.address), '')),
-      county         = coalesce(nullif(btrim(s.county), ''),         nullif(btrim(sh.county), '')),
-      business_hours = coalesce(nullif(btrim(s.business_hours), ''), nullif(btrim(sh.opening_hours), '')),
-      about          = coalesce(nullif(btrim(s.about), ''),          nullif(btrim(sh.description), ''))
-    from (select * from public.shops where status = 'approved' order by created_at limit 1) sh
-    where s.id = 1;
-  end if;
-end $$;
+alter table public.audit_log add column if not exists description text;
 
-
--- ---------------------------------------------------------------------
--- 3. REMOVE THE MULTI-SHOP LOGIC
---    Order matters: policies -> functions that read shop_id -> columns -> table.
--- ---------------------------------------------------------------------
-
--- 3a. Policies that depend on shops / shop ownership
-do $$
-begin
-  if to_regclass('public.shops') is not null then
-    drop policy if exists "shops: public read"  on public.shops;
-    drop policy if exists "shops: admin write"  on public.shops;
-    drop policy if exists "shops: owner update" on public.shops;
-    drop trigger if exists shops_updated_at on public.shops;
-    drop trigger if exists shops_guard_bu   on public.shops;
-    drop trigger if exists audit_shops_aiud on public.shops;
-  end if;
-end $$;
-
-drop policy if exists "products: owner write"        on public.products;
-drop policy if exists "product_images: owner write"  on public.product_images;
-drop policy if exists "product_variants: owner write" on public.product_variants;
-
-drop policy if exists "product-images: admin or owner upload" on storage.objects;
-drop policy if exists "product-images: admin or owner update" on storage.objects;
-drop policy if exists "product-images: admin or owner delete" on storage.objects;
-
--- 3b. Public visibility no longer depends on a shop
-create or replace function public.product_is_public(p_product uuid)
-returns boolean
-language sql
-stable
-security definer
-set search_path = public
-as $$
-  select exists (select 1 from public.products p where p.id = p_product and p.is_active);
-$$;
-
-drop policy if exists "products: public read" on public.products;
-create policy "products: public read" on public.products
-  for select using (is_active or public.is_admin());
-
-drop policy if exists "product_images: public read" on public.product_images;
-create policy "product_images: public read" on public.product_images
-  for select using (public.is_admin() or public.product_is_public(product_id));
-
-drop policy if exists "product_variants: public read" on public.product_variants;
-create policy "product_variants: public read" on public.product_variants
-  for select using (public.is_admin() or public.product_is_public(product_id));
-
--- 3c. Triggers / functions that still mention shop_id
-create or replace function public.audit_product_change()
-returns trigger
-language plpgsql
-security definer
-set search_path = public
-as $$
-begin
-  if tg_op = 'INSERT' then
-    perform public.write_audit('product.created', 'product', new.id::text, new.name, null, jsonb_build_object('status', new.status));
-  elsif tg_op = 'DELETE' then
-    perform public.write_audit('product.deleted', 'product', old.id::text, old.name, jsonb_build_object('name', old.name, 'status', old.status), null);
-  elsif new.status is distinct from old.status then
-    perform public.write_audit('product.status_changed', 'product', new.id::text, new.name, jsonb_build_object('status', old.status), jsonb_build_object('status', new.status));
-  elsif new.name is distinct from old.name or new.category_id is distinct from old.category_id
-        or new.description is distinct from old.description then
-    perform public.write_audit('product.updated', 'product', new.id::text, new.name,
-      public.jsonb_changed(to_jsonb(old), to_jsonb(new), array['updated_at', 'specs', 'is_active']) -> 'old',
-      public.jsonb_changed(to_jsonb(old), to_jsonb(new), array['updated_at', 'specs', 'is_active']) -> 'new');
-  end if;
-  return null;
-end;
-$$;
-
--- 3d. submit_order without shops (prices are still read from the database; the browser never sends one)
-create or replace function public.submit_order(p_customer jsonb, p_items jsonb)
-returns jsonb
-language plpgsql
-security definer
-set search_path = public
-as $$
+drop function if exists public.write_audit(text, text, text, text, jsonb, jsonb);
+create or replace function public.write_audit(
+  p_action      text,
+  p_entity_type text,
+  p_entity_id   text,
+  p_label       text,
+  p_old         jsonb,
+  p_new         jsonb,
+  p_description text default null)
+returns void language plpgsql security definer set search_path = public as $$
 declare
-  v_uid       uuid := auth.uid();
-  v_name      text := nullif(btrim(p_customer ->> 'customer_name'), '');
-  v_phone     text := nullif(btrim(p_customer ->> 'phone'), '');
-  v_alt       text := nullif(btrim(p_customer ->> 'alternative_phone'), '');
-  v_whatsapp  text := nullif(btrim(p_customer ->> 'whatsapp'), '');
-  v_email     text := lower(nullif(btrim(p_customer ->> 'customer_email'), ''));
-  v_pref      text := coalesce(nullif(btrim(p_customer ->> 'preferred_contact'), ''), 'phone');
-  v_method    text := coalesce(nullif(btrim(p_customer ->> 'fulfilment_method'), ''), 'delivery');
-  v_county    text := nullif(btrim(p_customer ->> 'county'), '');
-  v_town      text := nullif(btrim(p_customer ->> 'town'), '');
-  v_location  text := nullif(btrim(p_customer ->> 'delivery_location'), '');
-  v_notes     text := nullif(btrim(p_customer ->> 'notes'), '');
-  v_date      date;
-  s           public.store_settings;
-  v_item      jsonb;
-  v_row       record;
-  v_qty       integer;
-  v_lines     jsonb := '[]'::jsonb;
-  v_subtotal  numeric(12, 2) := 0;
-  v_fee       numeric(12, 2) := 0;
-  v_total     numeric(12, 2);
-  v_deposit   numeric(12, 2);
-  v_balance   numeric(12, 2);
-  v_order_id  uuid;
-  v_number    text;
-  v_created   timestamptz;
+  v_uid   uuid := auth.uid();
+  v_email text;
+  v_role  text;
 begin
-  -- who may order
   if v_uid is null then
-    raise exception 'Please log in or create an account to place an order.' using errcode = '28000';
+    return;                       -- SQL editor / migrations / service role: not a user action
   end if;
-  if not public.is_email_verified() then
-    raise exception 'Please verify your email address before placing an order.' using errcode = '28000';
-  end if;
-  if public.is_suspended() then
-    raise exception 'Your account is suspended. Please contact support.' using errcode = '42501';
-  end if;
-
-  -- contact details
-  if p_customer is null or jsonb_typeof(p_customer) <> 'object' then
-    raise exception 'Customer details are missing.' using errcode = '22023';
-  end if;
-  if v_email is null then
-    select lower(u.email) into v_email from auth.users u where u.id = v_uid;
-  end if;
-  if v_name is null or v_phone is null then
-    raise exception 'Please fill in your full name and phone number.' using errcode = '22023';
-  end if;
-  if v_email is null or v_email !~ '^[^@\s]+@[^@\s]+\.[^@\s]+$' then
-    raise exception 'Please enter a valid email address.' using errcode = '22023';
-  end if;
-  if v_pref not in ('phone', 'whatsapp', 'email') then
-    raise exception 'Invalid preferred contact method.' using errcode = '22023';
-  end if;
-  if v_method not in ('delivery', 'pickup') then
-    raise exception 'Invalid fulfilment method.' using errcode = '22023';
-  end if;
-  if v_method = 'delivery' then
-    if v_county is null or v_town is null or v_location is null then
-      raise exception 'Please fill in your county, town and delivery location.' using errcode = '22023';
-    end if;
-  else
-    v_county := coalesce(v_county, 'Pickup');
-    v_town := coalesce(v_town, 'Pickup');
-    v_location := coalesce(v_location, 'Customer pickup');
-  end if;
-
-  if p_items is null or jsonb_typeof(p_items) <> 'array' or jsonb_array_length(p_items) = 0 then
-    raise exception 'Your order list is empty.' using errcode = '22023';
-  end if;
-  if jsonb_array_length(p_items) > 50 then
-    raise exception 'Too many items in one order.' using errcode = '22023';
-  end if;
-
-  begin
-    v_date := nullif(p_customer ->> 'preferred_delivery_date', '')::date;
-  exception when others then
-    v_date := null;
-  end;
-
-  -- abuse guard: max 5 orders per customer per 10 minutes
-  if (select count(*) from public.orders o
-       where (o.user_id = v_uid or o.phone = v_phone) and o.created_at > now() - interval '10 minutes') >= 5 then
-    raise exception 'Too many orders in a short time. Please wait a few minutes.' using errcode = '22023';
-  end if;
-
-  select * into s from public.store_settings where id = 1;
-  if not found then
-    raise exception 'Store settings are missing. Please contact us.' using errcode = '22023';
-  end if;
-
-  -- price every line from the database (the browser can never send a price)
-  for v_item in select jsonb_array_elements(p_items) loop
-    v_qty := coalesce((v_item ->> 'quantity')::integer, 0);
-    if v_qty < 1 or v_qty > 100 then
-      raise exception 'Invalid quantity.' using errcode = '22023';
-    end if;
-
-    select
-      pv.id as variant_id, pv.label, pv.sku, pv.price, pv.availability, pv.stock,
-      p.id as product_id, p.name as product_name, p.status as product_status,
-      (select pi.url from public.product_images pi
-        where pi.product_id = p.id
-        order by pi.is_main desc, pi.sort_order asc
-        limit 1) as image_url
-    into v_row
-    from public.product_variants pv
-    join public.products p on p.id = pv.product_id
-    where pv.id = (v_item ->> 'variant_id')::uuid
-      and p.is_active;
-
-    if not found then
-      raise exception 'A product in your list is no longer available. Please refresh the page and try again.' using errcode = '22023';
-    end if;
-    if v_row.product_status = 'out_of_stock'
-       or v_row.availability = 'out_of_stock'
-       or (v_row.availability = 'in_stock' and v_row.stock <= 0) then
-      raise exception '% (%) is currently out of stock.', v_row.product_name, v_row.label using errcode = '22023';
-    end if;
-    if v_row.availability = 'in_stock' and v_qty > v_row.stock then
-      raise exception 'Only % of % (%) left in stock.', v_row.stock, v_row.product_name, v_row.label using errcode = '22023';
-    end if;
-
-    v_subtotal := v_subtotal + v_row.price * v_qty;
-    v_lines := v_lines || jsonb_build_array(jsonb_build_object(
-      'product_id', v_row.product_id, 'variant_id', v_row.variant_id,
-      'product_name', v_row.product_name, 'variant_label', v_row.label, 'sku', v_row.sku,
-      'image_url', v_row.image_url, 'unit_price', v_row.price, 'quantity', v_qty));
-  end loop;
-
-  if v_method = 'delivery' then
-    v_fee := public.compute_delivery_fee(v_county, v_town, v_subtotal);
-  end if;
-  v_total   := v_subtotal + v_fee;
-  v_deposit := round(v_total * s.deposit_percent / 100, 2);
-  v_balance := v_total - v_deposit;
-
-  insert into public.orders (
-    user_id, customer_name, phone, alternative_phone, whatsapp, customer_email, preferred_contact, fulfilment_method,
-    county, town, delivery_location, preferred_delivery_date, notes,
-    subtotal, delivery_fee, total, deposit_percent, deposit_amount, balance_amount
-  ) values (
-    v_uid, v_name, v_phone, v_alt, v_whatsapp, v_email, v_pref, v_method,
-    v_county, v_town, v_location, v_date, v_notes,
-    v_subtotal, v_fee, v_total, s.deposit_percent, v_deposit, v_balance
-  )
-  returning id, order_number, created_at into v_order_id, v_number, v_created;
-
-  insert into public.order_items (order_id, product_id, variant_id, product_name, variant_label, sku, image_url, unit_price, quantity)
-  select v_order_id, (l ->> 'product_id')::uuid, (l ->> 'variant_id')::uuid,
-         l ->> 'product_name', l ->> 'variant_label', l ->> 'sku', l ->> 'image_url',
-         (l ->> 'unit_price')::numeric, (l ->> 'quantity')::integer
-  from jsonb_array_elements(v_lines) as l;
-
-  insert into public.order_events (order_id, event_type, to_status, title, message, actor_id)
-  values (v_order_id, 'submitted', 'pending', 'Order submitted',
-          'We received your order. It is pending while our team reviews it.', v_uid);
-
-  perform public.queue_notification(v_uid, v_order_id, 'order_submitted', 'Order submitted',
-    format('Your order %s was received and is pending. Our team will contact you to confirm it. A payment of up to %s%% may be required.',
-           v_number, trim(to_char(s.deposit_percent, 'FM999990.##'))));
-
-  return jsonb_build_object(
-    'id', v_order_id, 'order_number', v_number, 'status', 'pending', 'payment_status', 'unpaid', 'created_at', v_created,
-    'customer_name', v_name, 'phone', v_phone, 'alternative_phone', v_alt, 'whatsapp', v_whatsapp,
-    'customer_email', v_email, 'preferred_contact', v_pref, 'fulfilment_method', v_method,
-    'county', v_county, 'town', v_town, 'delivery_location', v_location,
-    'preferred_delivery_date', v_date, 'notes', v_notes,
-    'subtotal', v_subtotal, 'delivery_fee', v_fee, 'total', v_total,
-    'deposit_percent', s.deposit_percent, 'deposit_amount', v_deposit, 'balance_amount', v_balance,
-    'items', v_lines);
+  select u.email into v_email from auth.users u where u.id = v_uid;
+  select p.role into v_role from public.profiles p where p.id = v_uid;
+  insert into public.audit_log (actor_id, actor_email, actor_role, action, entity_type, entity_id, entity_label, old_values, new_values, description)
+  values (v_uid, v_email, coalesce(v_role, 'customer'), p_action, p_entity_type, p_entity_id, p_label, p_old, p_new, p_description);
 end;
 $$;
+revoke all on function public.write_audit(text, text, text, text, jsonb, jsonb, text) from public, anon, authenticated;
 
--- 3e. Drop the shop helper functions, then the columns
-drop function if exists public.storage_path_owner(text);
-drop function if exists public.product_is_mine(uuid);
-drop function if exists public.is_shop_owner(uuid);
-drop function if exists public.shop_is_public(uuid);
-drop function if exists public.audit_shop_change();
-drop function if exists public.shops_guard();
-
-alter table public.products    drop column if exists shop_id;
-alter table public.order_items drop column if exists shop_id;
-drop index if exists public.products_shop_idx;
-drop index if exists public.order_items_shop_idx;
-
--- 3f. The shops table itself.
---     Empty (a fresh install)  -> dropped.
---     Contains rows            -> renamed to legacy_shops_archive: nothing is lost, nothing is exposed
---                                 (admin read-only). Drop it yourself once you have checked it:
---                                     drop table public.legacy_shops_archive;
-do $$
+-- append-only: nobody (not even the Super Admin) can edit or delete audit records through the API.
+-- (The only allowed change is Postgres clearing actor_id when that auth user is deleted.)
+revoke insert, update, delete, truncate on public.audit_log from anon, authenticated;
+create or replace function public.audit_log_immutable()
+returns trigger language plpgsql as $$
 begin
-  if to_regclass('public.shops') is not null then
-    if (select count(*) from public.shops) = 0 then
-      drop table public.shops;
-    else
-      alter table public.shops rename to legacy_shops_archive;
-    end if;
+  if tg_op = 'UPDATE' and new.actor_id is null and old.actor_id is not null
+     and (to_jsonb(new) - 'actor_id') = (to_jsonb(old) - 'actor_id') then
+    return new;
   end if;
+  raise exception 'Audit records cannot be changed or deleted.' using errcode = '42501';
+end;
+$$;
+drop trigger if exists audit_log_immutable_bud on public.audit_log;
+create trigger audit_log_immutable_bud before update or delete on public.audit_log
+  for each row execute function public.audit_log_immutable();
+
+drop policy if exists "audit_log: admin read" on public.audit_log;
+drop policy if exists "audit_log: permitted read" on public.audit_log;
+drop policy if exists "audit_log: permitted read" on public.audit_log;
+create policy "audit_log: permitted read" on public.audit_log
+  for select to authenticated using (public.has_permission('VIEW_AUDIT_LOGS'));
+create index if not exists audit_log_actor_idx on public.audit_log (actor_id, created_at desc);
+
+
+-- ---------------------------------------------------------------------
+-- 7. ROW LEVEL SECURITY BY PERMISSION  (replaces "any admin can do anything")
+-- ---------------------------------------------------------------------
+-- catalogue
+drop policy if exists "categories: admin write" on public.categories;
+drop policy if exists "categories: permitted write" on public.categories;
+create policy "categories: permitted write" on public.categories
+  for all to authenticated using (public.has_permission('MANAGE_PRODUCTS')) with check (public.has_permission('MANAGE_PRODUCTS'));
+
+drop policy if exists "products: admin write" on public.products;
+drop policy if exists "products: permitted write" on public.products;
+create policy "products: permitted write" on public.products
+  for all to authenticated using (public.has_permission('MANAGE_PRODUCTS')) with check (public.has_permission('MANAGE_PRODUCTS'));
+
+drop policy if exists "product_images: admin write" on public.product_images;
+drop policy if exists "product_images: permitted write" on public.product_images;
+create policy "product_images: permitted write" on public.product_images
+  for all to authenticated using (public.has_permission('MANAGE_PRODUCT_IMAGES')) with check (public.has_permission('MANAGE_PRODUCT_IMAGES'));
+
+drop policy if exists "product_variants: admin write" on public.product_variants;
+drop policy if exists "product_variants: permitted write" on public.product_variants;
+create policy "product_variants: permitted write" on public.product_variants
+  for all to authenticated
+  using      (public.has_any_permission(array['MANAGE_PRODUCTS', 'MANAGE_PRODUCT_PRICES']))
+  with check (public.has_any_permission(array['MANAGE_PRODUCTS', 'MANAGE_PRODUCT_PRICES']));
+
+-- A variant row holds both the PRICE and the stock / label. Prices need their own permission.
+create or replace function public.guard_variant_write()
+returns trigger language plpgsql security definer set search_path = public as $$
+begin
+  if auth.uid() is null then
+    return coalesce(new, old);                       -- migrations / SQL editor
+  end if;
+  if tg_op in ('INSERT', 'DELETE') then
+    if not public.has_permission('MANAGE_PRODUCTS') then
+      raise exception 'You do not have permission to add or remove product variants.' using errcode = '42501';
+    end if;
+    return coalesce(new, old);
+  end if;
+  if (to_jsonb(new) - 'price' - 'previous_price' - 'updated_at') is distinct from (to_jsonb(old) - 'price' - 'previous_price' - 'updated_at')
+     and not public.has_permission('MANAGE_PRODUCTS') then
+    raise exception 'You do not have permission to change product details or stock.' using errcode = '42501';
+  end if;
+  if (new.price is distinct from old.price or new.previous_price is distinct from old.previous_price)
+     and not public.has_permission('MANAGE_PRODUCT_PRICES') then
+    raise exception 'You do not have permission to change prices.' using errcode = '42501';
+  end if;
+  return new;
+end;
+$$;
+drop trigger if exists product_variants_guard_biud on public.product_variants;
+create trigger product_variants_guard_biud before insert or update or delete on public.product_variants
+  for each row execute function public.guard_variant_write();
+
+-- business information + media + delivery fees
+drop policy if exists "store_settings: admin write" on public.store_settings;
+drop policy if exists "store_settings: permitted write" on public.store_settings;
+create policy "store_settings: permitted write" on public.store_settings
+  for all to authenticated using (public.has_permission('MANAGE_BUSINESS_SETTINGS')) with check (public.has_permission('MANAGE_BUSINESS_SETTINGS'));
+
+drop policy if exists "delivery_locations: admin write" on public.delivery_locations;
+drop policy if exists "delivery_locations: permitted write" on public.delivery_locations;
+create policy "delivery_locations: permitted write" on public.delivery_locations
+  for all to authenticated using (public.has_permission('MANAGE_BUSINESS_SETTINGS')) with check (public.has_permission('MANAGE_BUSINESS_SETTINGS'));
+
+drop policy if exists "site_media: admin write" on public.site_media;
+drop policy if exists "site_media: permitted write" on public.site_media;
+create policy "site_media: permitted write" on public.site_media
+  for all to authenticated using (public.has_permission('MANAGE_MEDIA')) with check (public.has_permission('MANAGE_MEDIA'));
+
+-- orders: customers see their own; staff see orders only with an order-related permission; only the Super Admin deletes
+drop policy if exists "orders: read own or admin" on public.orders;
+drop policy if exists "orders: read own or permitted" on public.orders;
+create policy "orders: read own or permitted" on public.orders
+  for select to authenticated using (user_id = auth.uid() or public.can_view_orders());
+drop policy if exists "orders: admin delete" on public.orders;
+drop policy if exists "orders: super admin delete" on public.orders;
+create policy "orders: super admin delete" on public.orders
+  for delete to authenticated using (public.is_super_admin());
+
+drop policy if exists "order_items: read own or admin" on public.order_items;
+drop policy if exists "order_items: read own or permitted" on public.order_items;
+create policy "order_items: read own or permitted" on public.order_items
+  for select to authenticated
+  using (public.can_view_orders() or exists (select 1 from public.orders o where o.id = order_items.order_id and o.user_id = auth.uid()));
+drop policy if exists "order_items: admin delete" on public.order_items;
+drop policy if exists "order_items: super admin delete" on public.order_items;
+create policy "order_items: super admin delete" on public.order_items
+  for delete to authenticated using (public.is_super_admin());
+
+drop policy if exists "order_events: read" on public.order_events;
+drop policy if exists "order_events: read" on public.order_events;
+create policy "order_events: read" on public.order_events
+  for select to authenticated
+  using (public.can_view_orders()
+         or (visible_to_customer and exists (select 1 from public.orders o where o.id = order_events.order_id and o.user_id = auth.uid())));
+
+drop policy if exists "order_cancellation_reasons: admin all" on public.order_cancellation_reasons;
+drop policy if exists "order_cancellation_reasons: staff read" on public.order_cancellation_reasons;
+create policy "order_cancellation_reasons: staff read" on public.order_cancellation_reasons
+  for select to authenticated using (public.is_admin());
+drop policy if exists "order_cancellation_reasons: permitted write" on public.order_cancellation_reasons;
+create policy "order_cancellation_reasons: permitted write" on public.order_cancellation_reasons
+  for all to authenticated using (public.has_permission('MANAGE_ORDERS')) with check (public.has_permission('MANAGE_ORDERS'));
+drop policy if exists "order_update_templates: admin all" on public.order_update_templates;
+drop policy if exists "order_update_templates: staff read" on public.order_update_templates;
+create policy "order_update_templates: staff read" on public.order_update_templates
+  for select to authenticated using (public.is_admin());
+drop policy if exists "order_update_templates: permitted write" on public.order_update_templates;
+create policy "order_update_templates: permitted write" on public.order_update_templates
+  for all to authenticated using (public.has_permission('MANAGE_ORDERS')) with check (public.has_permission('MANAGE_ORDERS'));
+
+do $$ begin
   if to_regclass('public.legacy_shops_archive') is not null then
-    alter table public.legacy_shops_archive enable row level security;
-    revoke all on public.legacy_shops_archive from anon, authenticated;
-    grant select on public.legacy_shops_archive to authenticated;
     drop policy if exists "legacy_shops_archive: admin read" on public.legacy_shops_archive;
-    create policy "legacy_shops_archive: admin read" on public.legacy_shops_archive
-      for select to authenticated using (public.is_admin());
-    comment on table public.legacy_shops_archive is 'Archived rows of the removed multi-shop marketplace feature. Safe to drop once reviewed.';
+    drop policy if exists "legacy_shops_archive: super admin read" on public.legacy_shops_archive;
+    create policy "legacy_shops_archive: super admin read" on public.legacy_shops_archive
+      for select to authenticated using (public.is_super_admin());
   end if;
 end $$;
 
--- the old "default shop image" slot is unused now (rows are kept, just switched off)
-update public.site_media set is_active = false where slot = 'default_shop' and is_active;
-
--- 3g. Storage: only the admin writes to the bucket. Reading stays public (catalogue pictures).
-insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
-values ('product-images', 'product-images', true, 5242880,
-        array['image/jpeg', 'image/png', 'image/webp', 'image/avif', 'image/gif'])
-on conflict (id) do update
-  set public = excluded.public,
-      file_size_limit = excluded.file_size_limit,
-      allowed_mime_types = excluded.allowed_mime_types;
+-- storage: the folder decides which permission is needed
+create or replace function public.can_write_storage_path(p_name text)
+returns boolean language sql stable security definer set search_path = public as $$
+  select case split_part(coalesce(p_name, ''), '/', 1)
+           when 'products'   then public.has_permission('MANAGE_PRODUCT_IMAGES')
+           when 'categories' then public.has_permission('MANAGE_PRODUCTS')
+           else                   public.has_permission('MANAGE_MEDIA')
+         end;
+$$;
+grant execute on function public.can_write_storage_path(text) to authenticated;
 
 drop policy if exists "product-images: admin upload" on storage.objects;
 drop policy if exists "product-images: admin update" on storage.objects;
 drop policy if exists "product-images: admin delete" on storage.objects;
-create policy "product-images: admin upload" on storage.objects
-  for insert to authenticated
-  with check (bucket_id = 'product-images' and public.is_admin());
-create policy "product-images: admin update" on storage.objects
+drop policy if exists "product-images: permitted upload" on storage.objects;
+create policy "product-images: permitted upload" on storage.objects
+  for insert to authenticated with check (bucket_id = 'product-images' and public.can_write_storage_path(name));
+drop policy if exists "product-images: permitted update" on storage.objects;
+create policy "product-images: permitted update" on storage.objects
   for update to authenticated
-  using      (bucket_id = 'product-images' and public.is_admin())
-  with check (bucket_id = 'product-images' and public.is_admin());
-create policy "product-images: admin delete" on storage.objects
-  for delete to authenticated
-  using (bucket_id = 'product-images' and public.is_admin());
--- ("product-images: public read" from the original schema is kept)
+  using (bucket_id = 'product-images' and public.can_write_storage_path(name))
+  with check (bucket_id = 'product-images' and public.can_write_storage_path(name));
+drop policy if exists "product-images: permitted delete" on storage.objects;
+create policy "product-images: permitted delete" on storage.objects
+  for delete to authenticated using (bucket_id = 'product-images' and public.can_write_storage_path(name));
 
 
 -- ---------------------------------------------------------------------
--- 4. PREDEFINED CANCELLATION REASONS + CUSTOMER UPDATE MESSAGES
---    Stored in the database, so every admin device offers the same list.
+-- 8. ORDER / IMAGE / MEDIA FUNCTIONS now check the matching permission
 -- ---------------------------------------------------------------------
-create table if not exists public.order_cancellation_reasons (
-  code            text primary key check (code ~ '^[a-z0-9_]+$'),
-  label           text not null check (char_length(btrim(label)) between 1 and 200),
-  requires_detail boolean not null default false,        -- "Other": the admin must say what
-  sort_order      integer not null default 0,
-  is_active       boolean not null default true,
-  created_at      timestamptz not null default now(),
-  updated_at      timestamptz not null default now()
-);
-drop trigger if exists order_cancellation_reasons_updated_at on public.order_cancellation_reasons;
-create trigger order_cancellation_reasons_updated_at before update on public.order_cancellation_reasons
-  for each row execute function public.set_updated_at();
+CREATE OR REPLACE FUNCTION public.admin_set_payment_status(p_order_id uuid, p_payment_status text, p_message text DEFAULT NULL::text)
+ RETURNS jsonb
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public'
+AS $function$
+declare
+  o       public.orders;
+  v_old   text;
+  v_msg   text := nullif(btrim(coalesce(p_message, '')), '');
+begin
+  if not (public.has_permission('MANAGE_ORDERS')) then
+    raise exception 'You do not have permission to manage orders.' using errcode = '42501';
+  end if;
+  if p_payment_status not in ('unpaid', 'pending', 'confirmed') then
+    raise exception 'Unknown payment status.' using errcode = '22023';
+  end if;
+  select * into o from public.orders where id = p_order_id for update;
+  if not found then
+    raise exception 'Order not found.' using errcode = '22023';
+  end if;
+  if o.status in ('cancelled', 'completed') then
+    raise exception 'The payment of a % order cannot be changed.', o.status using errcode = '22023';
+  end if;
+  v_old := o.payment_status;
+  if p_payment_status = v_old then
+    raise exception 'Payment is already marked as %.', v_old using errcode = '22023';
+  end if;
 
-insert into public.order_cancellation_reasons (code, label, requires_detail, sort_order) values
-  ('out_of_stock',              'Product is currently out of stock',                    false, 10),
-  ('product_unavailable',       'Product is no longer available',                       false, 20),
-  ('customer_requested',        'Customer requested cancellation',                      false, 30),
-  ('customer_unreachable',      'Customer could not be reached',                        false, 40),
-  ('payment_not_completed',     'Payment was not completed',                            false, 50),
-  ('delivery_unavailable',      'Delivery location is unavailable',                     false, 60),
-  ('order_incomplete',          'Order information is incomplete',                      false, 70),
-  ('order_unconfirmed',         'Order could not be confirmed',                         false, 80),
-  ('details_need_confirmation', 'Price/details require confirmation',                   false, 90),
-  ('business_unable',           'Business is temporarily unable to process the order',  false, 100),
-  ('duplicate_order',           'Duplicate order',                                      false, 110),
-  ('other',                     'Other',                                                true,  999)
-on conflict (code) do nothing;
+  perform set_config('beihub.order_rpc', 'on', true);
+  update public.orders set payment_status = p_payment_status where id = o.id returning * into o;
 
-create table if not exists public.order_update_templates (
-  code        text primary key check (code ~ '^[a-z0-9_]+$'),
-  message     text not null check (char_length(btrim(message)) between 1 and 300),
-  sort_order  integer not null default 0,
-  is_active   boolean not null default true,
-  created_at  timestamptz not null default now(),
-  updated_at  timestamptz not null default now()
-);
-drop trigger if exists order_update_templates_updated_at on public.order_update_templates;
-create trigger order_update_templates_updated_at before update on public.order_update_templates
-  for each row execute function public.set_updated_at();
+  insert into public.order_events (order_id, event_type, title, message, actor_id)
+  values (o.id, 'payment_updated',
+          case p_payment_status when 'confirmed' then 'Payment confirmed' when 'pending' then 'Payment pending' else 'Payment reset' end,
+          v_msg, auth.uid());
 
-insert into public.order_update_templates (code, message, sort_order) values
-  ('received',           'Your order has been received.',                      10),
-  ('confirmed',          'Your order has been confirmed.',                     20),
-  ('processing',         'Your order is being processed.',                     30),
-  ('payment_pending',    'Payment is pending.',                                40),
-  ('ready',              'Your order is ready.',                               50),
-  ('ready_for_delivery', 'Your order is ready for delivery.',                  60),
-  ('dispatched',         'Your order has been dispatched.',                    70),
-  ('completed',          'Your order has been completed.',                     80),
-  ('need_to_contact',    'We need to contact you to confirm your order.',      90),
-  ('unable_to_reach',    'We were unable to reach you.',                       100),
-  ('cancelled',          'Your order has been cancelled.',                     110)
-on conflict (code) do nothing;
+  if p_payment_status = 'confirmed' then
+    perform public.queue_notification(o.user_id, o.id, 'payment_confirmed', 'Payment confirmed',
+      format('We have received your payment for order %s. Thank you.', o.order_number));
+  elsif p_payment_status = 'pending' then
+    perform public.queue_notification(o.user_id, o.id, 'payment_required', 'Payment required',
+      format('Order %s needs a payment of up to %s%% (about KSh %s). Our team will send you the payment instructions.',
+             o.order_number, trim(to_char(o.deposit_percent, 'FM999990.##')), trim(to_char(o.deposit_amount, 'FM999,999,990.00'))));
+  end if;
 
--- orders remember WHICH predefined reason was used (cancellation_reason keeps the customer-facing text)
-alter table public.orders
-  add column if not exists cancellation_reason_code text
-  references public.order_cancellation_reasons (code) on update cascade on delete restrict;
+  perform public.write_audit('order.payment_updated', 'order', o.id::text, o.order_number,
+    jsonb_build_object('payment_status', v_old), jsonb_build_object('payment_status', p_payment_status));
+  return to_jsonb(o);
+end;
+$function$;
 
-update public.orders set cancellation_reason_code = 'customer_requested'
- where status = 'cancelled' and cancellation_reason_code is null and cancellation_reason like 'Cancelled by the customer%';
+CREATE OR REPLACE FUNCTION public.admin_add_order_note(p_order_id uuid, p_note text)
+ RETURNS void
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public'
+AS $function$
+declare v_note text := nullif(btrim(coalesce(p_note, '')), '');
+begin
+  if not (public.has_permission('MANAGE_ORDERS')) then
+    raise exception 'You do not have permission to manage orders.' using errcode = '42501';
+  end if;
+  if v_note is null then
+    raise exception 'Write a note first.' using errcode = '22023';
+  end if;
+  if not exists (select 1 from public.orders where id = p_order_id) then
+    raise exception 'Order not found.' using errcode = '22023';
+  end if;
+  insert into public.order_events (order_id, event_type, title, message, visible_to_customer, actor_id)
+  values (p_order_id, 'note', 'Admin note', v_note, false, auth.uid());
+end;
+$function$;
 
--- the timeline gets a plain "update" event (admin message that does not change the status)
-alter table public.order_events drop constraint if exists order_events_event_type_check;
-alter table public.order_events add constraint order_events_event_type_check
-  check (event_type in ('submitted', 'status_changed', 'payment_updated', 'note', 'update'));
+CREATE OR REPLACE FUNCTION public.set_main_image(p_image_id uuid)
+ RETURNS void
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public'
+AS $function$
+declare
+  v_product uuid;
+begin
+  if not (public.has_permission('MANAGE_PRODUCT_IMAGES')) then
+    raise exception 'You do not have permission to manage product images.' using errcode = '42501';
+  end if;
+  select pi.product_id into v_product from public.product_images pi where pi.id = p_image_id;
+  if v_product is null then
+    raise exception 'Image not found.' using errcode = '22023';
+  end if;
+  update public.product_images set is_main = false where product_id = v_product and is_main;
+  update public.product_images set is_main = true where id = p_image_id;
+end;
+$function$;
 
--- Admin: move an order along its lifecycle.
---   Cancelling needs a PREDEFINED reason (p_reason_code). "Other" also needs p_reason (free text).
---   p_update_code adds one of the predefined customer messages; p_message is an optional extra sentence.
-drop function if exists public.admin_set_order_status(uuid, text, text, text);
-create or replace function public.admin_set_order_status(
-  p_order_id    uuid,
-  p_status      text,
-  p_reason      text default null,      -- detail / "please specify" text
-  p_message     text default null,      -- optional custom sentence for the customer
-  p_reason_code text default null,      -- order_cancellation_reasons.code (required when cancelling)
-  p_update_code text default null)      -- order_update_templates.code (optional)
-returns jsonb
-language plpgsql
-security definer
-set search_path = public
-as $$
+CREATE OR REPLACE FUNCTION public.set_primary_site_media(p_media_id uuid)
+ RETURNS void
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public'
+AS $function$
+declare v_slot text;
+begin
+  if not (public.has_permission('MANAGE_MEDIA')) then
+    raise exception 'You do not have permission to manage media.' using errcode = '42501';
+  end if;
+  select slot into v_slot from public.site_media where id = p_media_id;
+  if v_slot is null then
+    raise exception 'Image not found.' using errcode = '22023';
+  end if;
+  update public.site_media set is_primary = false where slot = v_slot and is_primary;
+  update public.site_media set is_primary = true  where id = p_media_id;
+end;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.admin_set_order_status(p_order_id uuid, p_status text, p_reason text DEFAULT NULL::text, p_message text DEFAULT NULL::text, p_reason_code text DEFAULT NULL::text, p_update_code text DEFAULT NULL::text)
+ RETURNS jsonb
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public'
+AS $function$
 declare
   o         public.orders;
   rsn       public.order_cancellation_reasons;
@@ -587,8 +623,8 @@ declare
   v_ok      boolean;
   v_notice  jsonb;
 begin
-  if not public.is_admin() then
-    raise exception 'Not authorised.' using errcode = '42501';
+  if not (public.has_any_permission(array['UPDATE_ORDER_STATUS', 'CANCEL_ORDERS'])) then
+    raise exception 'You do not have permission to change order status.' using errcode = '42501';
   end if;
   select * into o from public.orders where id = p_order_id for update;
   if not found then
@@ -598,6 +634,12 @@ begin
   if p_status is null or p_status not in ('pending', 'confirmed', 'payment_pending', 'processing',
                                            'ready_for_pickup', 'waiting_for_delivery', 'completed', 'cancelled') then
     raise exception 'Unknown order status.' using errcode = '22023';
+  end if;
+  if p_status = 'cancelled' and not public.has_permission('CANCEL_ORDERS') then
+    raise exception 'You do not have permission to cancel orders.' using errcode = '42501';
+  end if;
+  if p_status <> 'cancelled' and not public.has_permission('UPDATE_ORDER_STATUS') then
+    raise exception 'You do not have permission to update order status.' using errcode = '42501';
   end if;
   if p_status = v_old then
     raise exception 'This order is already %.', replace(v_old, '_', ' ') using errcode = '22023';
@@ -689,15 +731,14 @@ begin
 
   return to_jsonb(o);
 end;
-$$;
+$function$;
 
--- Admin: send the customer an update WITHOUT changing the status (predefined sentence and/or custom text).
-create or replace function public.admin_send_order_update(p_order_id uuid, p_update_code text default null, p_message text default null)
-returns jsonb
-language plpgsql
-security definer
-set search_path = public
-as $$
+CREATE OR REPLACE FUNCTION public.admin_send_order_update(p_order_id uuid, p_update_code text DEFAULT NULL::text, p_message text DEFAULT NULL::text)
+ RETURNS jsonb
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public'
+AS $function$
 declare
   o       public.orders;
   v_ucode text := nullif(btrim(coalesce(p_update_code, '')), '');
@@ -705,8 +746,8 @@ declare
   v_tpl   text;
   v_text  text;
 begin
-  if not public.is_admin() then
-    raise exception 'Not authorised.' using errcode = '42501';
+  if not (public.has_any_permission(array['MANAGE_ORDERS', 'MANAGE_NOTIFICATIONS'])) then
+    raise exception 'You do not have permission to send order updates.' using errcode = '42501';
   end if;
   if v_ucode is null and v_msg is null then
     raise exception 'Choose an update to send or write a message.' using errcode = '22023';
@@ -739,149 +780,642 @@ begin
     null, jsonb_build_object('update_code', v_ucode, 'message', v_msg));
   return to_jsonb(o);
 end;
+$function$;
+
+
+-- ---------------------------------------------------------------------
+-- 9. ADMIN INVITATIONS
+--    - the e-mail link carries a one-time token; only its SHA-256 hash is stored
+--    - expires after 7 days, can be revoked or re-sent (a re-send invalidates the old token)
+--    - accepting needs: a signed-in session whose VERIFIED e-mail equals the invited address + the token
+--    - a normal registration can never become an admin
+--    The table is reachable ONLY through the functions below (no grants, no policies).
+-- ---------------------------------------------------------------------
+create table if not exists public.admin_invitations (
+  id               uuid primary key default gen_random_uuid(),
+  email            text not null check (email = lower(email)),
+  full_name        text not null,
+  phone            text,
+  role             text not null default 'admin' check (role = 'admin'),
+  permissions      text[] not null default '{}',
+  token_hash       text not null,
+  status           text not null default 'pending' check (status in ('pending', 'accepted', 'expired', 'revoked')),
+  invited_by       uuid references auth.users (id) on delete set null,
+  invited_at       timestamptz not null default now(),
+  expires_at       timestamptz not null,
+  last_sent_at     timestamptz not null default now(),
+  send_count       integer not null default 1,
+  accepted_at      timestamptz,
+  accepted_user_id uuid references auth.users (id) on delete set null,
+  revoked_at       timestamptz,
+  revoked_by       uuid references auth.users (id) on delete set null
+);
+create unique index if not exists admin_invitations_one_pending on public.admin_invitations (email) where status = 'pending';
+create unique index if not exists admin_invitations_token_idx   on public.admin_invitations (token_hash);
+create index if not exists admin_invitations_status_idx on public.admin_invitations (status, invited_at desc);
+alter table public.admin_invitations enable row level security;
+revoke all on public.admin_invitations from anon, authenticated;
+
+create or replace function public._can_manage_admins()
+returns boolean language sql stable security definer set search_path = public as $$
+  select public.is_super_admin() or public.has_permission('MANAGE_ADMINS');
+$$;
+revoke all on function public._can_manage_admins() from public, anon, authenticated;
+
+create or replace function public._token_hash(p_token text)
+returns text language sql immutable as $$
+  select encode(sha256(convert_to(coalesce(p_token, ''), 'UTF8')), 'hex');
+$$;
+revoke all on function public._token_hash(text) from public, anon, authenticated;
+
+-- may the caller grant exactly this set of permissions?
+create or replace function public._check_grantable(p_perms text[])
+returns void language plpgsql stable security definer set search_path = public as $$
+declare bad text;
+begin
+  select x into bad from unnest(p_perms) x where not exists (select 1 from public.permissions c where c.code = x) limit 1;
+  if bad is not null then
+    raise exception 'Unknown permission: %.', bad using errcode = '22023';
+  end if;
+  if not public.is_super_admin() then
+    select x into bad from unnest(p_perms) x
+     where exists (select 1 from public.permissions c where c.code = x and c.restricted) or not public.has_permission(x) limit 1;
+    if bad is not null then
+      raise exception 'You cannot grant the permission %.', bad using errcode = '42501';
+    end if;
+  end if;
+end;
+$$;
+revoke all on function public._check_grantable(text[]) from public, anon, authenticated;
+
+create or replace function public.admin_create_invitation(p_email text, p_full_name text, p_phone text, p_permissions text[])
+returns jsonb language plpgsql security definer set search_path = public as $$
+declare
+  v_email text := lower(btrim(coalesce(p_email, '')));
+  v_name  text := btrim(coalesce(p_full_name, ''));
+  v_phone text := nullif(btrim(coalesce(p_phone, '')), '');
+  v_perms text[];
+  v_token text;
+  v_id    uuid;
+  v_exp   timestamptz := now() + interval '7 days';
+begin
+  if not public._can_manage_admins() then
+    raise exception 'You do not have permission to manage administrators.' using errcode = '42501';
+  end if;
+  if v_email !~ '^[^@\s]+@[^@\s]+\.[^@\s]+$' then
+    raise exception 'Enter a valid email address.' using errcode = '22023';
+  end if;
+  if char_length(v_name) not between 2 and 120 then
+    raise exception 'Enter the administrator''s full name.' using errcode = '22023';
+  end if;
+  if v_phone is not null and v_phone !~ '^\+?[0-9][0-9 ()\-]{5,24}$' then
+    raise exception 'The phone number looks invalid.' using errcode = '22023';
+  end if;
+  v_perms := coalesce((select array_agg(distinct x order by x) from unnest(coalesce(p_permissions, '{}')) x), '{}');
+  perform public._check_grantable(v_perms);
+
+  if exists (select 1 from auth.users u join public.profiles p on p.id = u.id
+              where lower(u.email) = v_email and p.role in ('admin', 'super_admin')) then
+    raise exception 'This person is already an administrator.' using errcode = '22023';
+  end if;
+  update public.admin_invitations set status = 'expired' where status = 'pending' and expires_at < now();
+  if exists (select 1 from public.admin_invitations where email = v_email and status = 'pending') then
+    raise exception 'There is already a pending invitation for this email. Resend or revoke it.' using errcode = '22023';
+  end if;
+
+  v_token := replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', '');
+  insert into public.admin_invitations (email, full_name, phone, permissions, token_hash, invited_by, expires_at)
+  values (v_email, v_name, v_phone, v_perms, public._token_hash(v_token), auth.uid(), v_exp)
+  returning id into v_id;
+
+  perform public.write_audit('admin.invited', 'admin_invitation', v_id::text, v_email, null,
+    jsonb_build_object('permissions', to_jsonb(v_perms), 'expires_at', v_exp), 'Invited ' || v_name || ' (' || v_email || ') as an administrator');
+  return jsonb_build_object('id', v_id, 'token', v_token, 'email', v_email, 'expires_at', v_exp);
+end;
 $$;
 
--- Customer: cancel their OWN order while it is still pending (records the predefined reason code too).
-create or replace function public.customer_cancel_order(p_order_id uuid, p_reason text)
-returns jsonb
-language plpgsql
-security definer
-set search_path = public
-as $$
+-- a NEW token (the old link stops working) + a fresh 7 days
+create or replace function public.admin_reissue_invitation(p_invitation uuid)
+returns jsonb language plpgsql security definer set search_path = public as $$
 declare
-  o        public.orders;
-  v_reason text := nullif(btrim(coalesce(p_reason, '')), '');
+  inv     public.admin_invitations;
+  v_token text;
+  v_exp   timestamptz := now() + interval '7 days';
+begin
+  if not public._can_manage_admins() then
+    raise exception 'You do not have permission to manage administrators.' using errcode = '42501';
+  end if;
+  select * into inv from public.admin_invitations where id = p_invitation for update;
+  if not found then raise exception 'Invitation not found.' using errcode = '22023'; end if;
+  if inv.status in ('accepted', 'revoked') then
+    raise exception 'A % invitation cannot be sent again. Create a new invitation instead.', inv.status using errcode = '22023';
+  end if;
+  v_token := replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', '');
+  update public.admin_invitations
+     set token_hash = public._token_hash(v_token), status = 'pending', expires_at = v_exp,
+         last_sent_at = now(), send_count = send_count + 1
+   where id = inv.id;
+  perform public.write_audit('admin.invitation_resent', 'admin_invitation', inv.id::text, inv.email, null,
+    jsonb_build_object('expires_at', v_exp), 'Re-sent the invitation to ' || inv.email);
+  return jsonb_build_object('id', inv.id, 'token', v_token, 'email', inv.email, 'expires_at', v_exp);
+end;
+$$;
+
+create or replace function public.admin_revoke_invitation(p_invitation uuid)
+returns void language plpgsql security definer set search_path = public as $$
+declare inv public.admin_invitations;
+begin
+  if not public._can_manage_admins() then
+    raise exception 'You do not have permission to manage administrators.' using errcode = '42501';
+  end if;
+  select * into inv from public.admin_invitations where id = p_invitation for update;
+  if not found then raise exception 'Invitation not found.' using errcode = '22023'; end if;
+  if inv.status not in ('pending', 'expired') then
+    raise exception 'A % invitation cannot be revoked.', inv.status using errcode = '22023';
+  end if;
+  update public.admin_invitations set status = 'revoked', revoked_at = now(), revoked_by = auth.uid() where id = inv.id;
+  perform public.write_audit('admin.invitation_revoked', 'admin_invitation', inv.id::text, inv.email, null, null, 'Revoked the invitation for ' || inv.email);
+end;
+$$;
+
+create or replace function public.admin_list_invitations()
+returns table (id uuid, email text, full_name text, phone text, permissions text[], status text,
+               invited_by_name text, invited_at timestamptz, expires_at timestamptz, last_sent_at timestamptz,
+               send_count integer, accepted_at timestamptz, revoked_at timestamptz)
+language plpgsql security definer set search_path = public as $$
+begin
+  if not public._can_manage_admins() then
+    raise exception 'You do not have permission to manage administrators.' using errcode = '42501';
+  end if;
+  update public.admin_invitations i set status = 'expired' where i.status = 'pending' and i.expires_at < now();
+  return query
+    select i.id, i.email, i.full_name, i.phone, i.permissions, i.status,
+           coalesce(nullif(pr.full_name, ''), u.email::text), i.invited_at, i.expires_at, i.last_sent_at,
+           i.send_count, i.accepted_at, i.revoked_at
+      from public.admin_invitations i
+      left join public.profiles pr on pr.id = i.invited_by
+      left join auth.users u on u.id = i.invited_by
+     order by i.invited_at desc;      -- token_hash is never returned
+end;
+$$;
+
+-- shared checks for the person who clicked the e-mail link. ONE generic message on purpose.
+create or replace function public._invitation_for_caller(p_token text, p_lock boolean)
+returns public.admin_invitations language plpgsql security definer set search_path = public as $$
+declare
+  inv     public.admin_invitations;
+  v_email text;
+  v_conf  timestamptz;
+  v_msg   constant text := 'This invitation is invalid, has expired, was revoked, or was sent to a different email address.';
 begin
   if auth.uid() is null then
-    raise exception 'Please log in.' using errcode = '28000';
+    raise exception 'Please open the link from your invitation email to sign in.' using errcode = '28000';
   end if;
-  if public.is_suspended() then
-    raise exception 'Your account is suspended. Please contact support.' using errcode = '42501';
+  select u.email, u.email_confirmed_at into v_email, v_conf from auth.users u where u.id = auth.uid();
+  if v_conf is null then
+    raise exception 'Your email address is not verified yet. Open the link from your invitation email.' using errcode = '28000';
   end if;
-  select * into o from public.orders where id = p_order_id and user_id = auth.uid() for update;
-  if not found then
-    raise exception 'Order not found.' using errcode = '22023';
-  end if;
-  if o.status <> 'pending' then
-    raise exception 'This order has already been confirmed. Please contact us to cancel it.' using errcode = '22023';
-  end if;
-  if v_reason is null then
-    v_reason := 'Cancelled by the customer.';
+  if p_lock then
+    select * into inv from public.admin_invitations where token_hash = public._token_hash(p_token) for update;
   else
-    v_reason := 'Cancelled by the customer: ' || left(v_reason, 300);
+    select * into inv from public.admin_invitations where token_hash = public._token_hash(p_token);
+  end if;
+  if not found or inv.status <> 'pending' or lower(inv.email) <> lower(v_email) then
+    raise exception '%', v_msg using errcode = '22023';
+  end if;
+  if inv.expires_at < now() then
+    update public.admin_invitations set status = 'expired' where id = inv.id;
+    raise exception '%', v_msg using errcode = '22023';
+  end if;
+  return inv;
+end;
+$$;
+revoke all on function public._invitation_for_caller(text, boolean) from public, anon, authenticated;
+
+create or replace function public.invitation_preview(p_token text)
+returns jsonb language plpgsql security definer set search_path = public as $$
+declare inv public.admin_invitations;
+begin
+  inv := public._invitation_for_caller(p_token, false);
+  return jsonb_build_object('email', inv.email, 'full_name', inv.full_name, 'phone', inv.phone,
+                            'permissions', to_jsonb(inv.permissions), 'expires_at', inv.expires_at);
+end;
+$$;
+
+create or replace function public.accept_admin_invitation(p_token text, p_full_name text, p_phone text)
+returns jsonb language plpgsql security definer set search_path = public as $$
+declare
+  inv     public.admin_invitations;
+  v_user  uuid := auth.uid();
+  v_name  text := btrim(coalesce(p_full_name, ''));
+  v_phone text := nullif(btrim(coalesce(p_phone, '')), '');
+  pr      public.profiles;
+begin
+  inv := public._invitation_for_caller(p_token, true);
+  select * into pr from public.profiles where id = v_user;
+  if not found or pr.is_suspended then
+    raise exception 'This account cannot accept the invitation.' using errcode = '42501';
+  end if;
+  if pr.role in ('admin', 'super_admin') then
+    raise exception 'You are already an administrator.' using errcode = '22023';
+  end if;
+  if char_length(v_name) not between 2 and 120 then
+    raise exception 'Enter your full name.' using errcode = '22023';
+  end if;
+  if v_phone is null or v_phone !~ '^\+?[0-9][0-9 ()\-]{5,24}$' then
+    raise exception 'Enter a valid phone number.' using errcode = '22023';
   end if;
 
-  perform set_config('beihub.order_rpc', 'on', true);
-  update public.orders
-     set status = 'cancelled', cancellation_reason = v_reason, cancellation_reason_code = 'customer_requested',
-         cancelled_at = now(), cancelled_by = auth.uid()
-   where id = o.id returning * into o;
+  perform set_config('beihub.rbac_rpc', 'on', true);
+  update public.profiles
+     set role = 'admin', full_name = v_name, phone = v_phone, admin_since = now(), invited_by = inv.invited_by
+   where id = v_user;
+  insert into public.admin_permissions (user_id, permission, granted_by)
+  select v_user, x, inv.invited_by from unnest(inv.permissions) x
+  on conflict do nothing;
+  update public.admin_invitations set status = 'accepted', accepted_at = now(), accepted_user_id = v_user where id = inv.id;
 
-  insert into public.order_events (order_id, event_type, from_status, to_status, title, message, actor_id)
-  values (o.id, 'status_changed', 'pending', 'cancelled', 'Order cancelled', v_reason, auth.uid());
-  perform public.queue_notification(o.user_id, o.id, 'order_cancelled', 'Order cancelled',
-    format('Order %s was cancelled. Reason: %s', o.order_number, v_reason));
-  perform public.write_audit('order.cancelled', 'order', o.id::text, o.order_number,
-    jsonb_build_object('status', 'pending'), jsonb_build_object('status', 'cancelled', 'reason', v_reason, 'reason_code', 'customer_requested'));
-  return to_jsonb(o);
+  perform public.write_audit('admin.invitation_accepted', 'admin', v_user::text, inv.email, null,
+    jsonb_build_object('permissions', to_jsonb(inv.permissions)), v_name || ' accepted the administrator invitation');
+  return public.my_access();
+end;
+$$;
+
+grant execute on function
+  public.admin_create_invitation(text, text, text, text[]), public.admin_reissue_invitation(uuid),
+  public.admin_revoke_invitation(uuid), public.admin_list_invitations(),
+  public.invitation_preview(text), public.accept_admin_invitation(text, text, text)
+  to authenticated;
+revoke all on function
+  public.admin_create_invitation(text, text, text, text[]), public.admin_reissue_invitation(uuid),
+  public.admin_revoke_invitation(uuid), public.admin_list_invitations(),
+  public.invitation_preview(text), public.accept_admin_invitation(text, text, text)
+  from public, anon;
+
+
+-- ---------------------------------------------------------------------
+-- 10. ADMINISTRATORS: list, permissions, suspend / reactivate, revoke, transfer ownership
+--     Rules enforced here (not in React):
+--       * nobody can change, suspend or revoke the Super Admin
+--       * nobody can change their own permissions or suspend / revoke themselves
+--       * an admin who was granted MANAGE_ADMINS can only manage plain admins, can never grant
+--         MANAGE_ADMINS and can only grant permissions they hold themselves
+-- ---------------------------------------------------------------------
+create or replace function public.admin_list_admins()
+returns table (id uuid, full_name text, email text, phone text, role text, is_suspended boolean, suspended_reason text,
+               email_verified boolean, last_login_at timestamptz, last_logout_at timestamptz, created_at timestamptz,
+               admin_since timestamptz, invited_by_name text, permissions text[])
+language plpgsql security definer set search_path = public as $$
+begin
+  if not public._can_manage_admins() then
+    raise exception 'You do not have permission to manage administrators.' using errcode = '42501';
+  end if;
+  return query
+    select p.id, p.full_name, u.email::text, p.phone, p.role, p.is_suspended, p.suspended_reason,
+           (u.email_confirmed_at is not null), coalesce(p.last_login_at, u.last_sign_in_at), p.last_logout_at, p.created_at,
+           p.admin_since, coalesce(nullif(ip.full_name, ''), iu.email::text),
+           case when p.role = 'super_admin' then (select array_agg(c.code order by c.sort_order) from public.permissions c)
+                else coalesce((select array_agg(ap.permission order by ap.permission) from public.admin_permissions ap where ap.user_id = p.id), '{}') end
+      from public.profiles p
+      join auth.users u on u.id = p.id
+      left join public.profiles ip on ip.id = p.invited_by
+      left join auth.users iu on iu.id = p.invited_by
+     where p.role in ('admin', 'super_admin')
+     order by (p.role = 'super_admin') desc, p.created_at;
+end;
+$$;
+
+-- common guard for actions on ANOTHER administrator
+create or replace function public._target_admin(p_user uuid)
+returns public.profiles language plpgsql security definer set search_path = public as $$
+declare t public.profiles;
+begin
+  if not public._can_manage_admins() then
+    raise exception 'You do not have permission to manage administrators.' using errcode = '42501';
+  end if;
+  select * into t from public.profiles where id = p_user;
+  if not found or t.role not in ('admin', 'super_admin') then
+    raise exception 'Administrator not found.' using errcode = '22023';
+  end if;
+  if t.role = 'super_admin' then
+    raise exception 'The Super Admin cannot be changed.' using errcode = '42501';
+  end if;
+  if t.id = auth.uid() then
+    raise exception 'You cannot do this to your own account.' using errcode = '42501';
+  end if;
+  if not public.is_super_admin() and exists (select 1 from public.admin_permissions where user_id = t.id and permission = 'MANAGE_ADMINS') then
+    raise exception 'Only the Super Admin can manage an administrator who can manage administrators.' using errcode = '42501';
+  end if;
+  return t;
+end;
+$$;
+revoke all on function public._target_admin(uuid) from public, anon, authenticated;
+
+create or replace function public.admin_set_admin_permissions(p_user uuid, p_permissions text[])
+returns jsonb language plpgsql security definer set search_path = public as $$
+declare
+  t       public.profiles;
+  v_new   text[] := coalesce((select array_agg(distinct x order by x) from unnest(coalesce(p_permissions, '{}')) x), '{}');
+  v_old   text[];
+begin
+  t := public._target_admin(p_user);
+  select coalesce(array_agg(permission order by permission), '{}') into v_old from public.admin_permissions where user_id = t.id;
+  -- only the permissions that are being ADDED must be grantable by the caller
+  perform public._check_grantable(coalesce((select array_agg(x) from unnest(v_new) x where x <> all (v_old)), '{}'));
+  delete from public.admin_permissions where user_id = t.id and permission <> all (v_new);
+  insert into public.admin_permissions (user_id, permission, granted_by)
+  select t.id, x, auth.uid() from unnest(v_new) x on conflict do nothing;
+  perform public.write_audit('admin.permissions_changed', 'admin', t.id::text, coalesce(nullif(t.full_name, ''), t.id::text),
+    jsonb_build_object('permissions', to_jsonb(v_old)), jsonb_build_object('permissions', to_jsonb(v_new)),
+    'Changed the permissions of ' || coalesce(nullif(t.full_name, ''), t.id::text));
+  return jsonb_build_object('permissions', to_jsonb(v_new));
+end;
+$$;
+
+create or replace function public.admin_set_admin_suspended(p_user uuid, p_suspended boolean, p_reason text default null)
+returns void language plpgsql security definer set search_path = public as $$
+declare
+  t      public.profiles;
+  v_why  text := nullif(btrim(coalesce(p_reason, '')), '');
+begin
+  t := public._target_admin(p_user);
+  if p_suspended and v_why is null then
+    raise exception 'Enter a reason for the suspension.' using errcode = '22023';
+  end if;
+  perform set_config('beihub.rbac_rpc', 'on', true);
+  update public.profiles
+     set is_suspended = p_suspended,
+         suspended_reason = case when p_suspended then v_why else null end,
+         suspended_at = case when p_suspended then now() else null end,
+         suspended_by = case when p_suspended then auth.uid() else null end
+   where id = t.id;
+  perform public.write_audit(case when p_suspended then 'admin.suspended' else 'admin.reactivated' end, 'admin', t.id::text,
+    coalesce(nullif(t.full_name, ''), t.id::text), jsonb_build_object('suspended', t.is_suspended),
+    jsonb_build_object('suspended', p_suspended, 'reason', v_why),
+    case when p_suspended then 'Suspended administrator ' else 'Reactivated administrator ' end || coalesce(nullif(t.full_name, ''), t.id::text));
+end;
+$$;
+
+create or replace function public.admin_revoke_admin(p_user uuid)
+returns void language plpgsql security definer set search_path = public as $$
+declare
+  t public.profiles;
+  v_old text[];
+begin
+  t := public._target_admin(p_user);
+  select coalesce(array_agg(permission order by permission), '{}') into v_old from public.admin_permissions where user_id = t.id;
+  perform set_config('beihub.rbac_rpc', 'on', true);
+  delete from public.admin_permissions where user_id = t.id;
+  update public.profiles set role = 'customer', admin_since = null where id = t.id;
+  perform public.write_audit('admin.revoked', 'admin', t.id::text, coalesce(nullif(t.full_name, ''), t.id::text),
+    jsonb_build_object('role', 'admin', 'permissions', to_jsonb(v_old)), jsonb_build_object('role', 'customer'),
+    'Removed administrator access from ' || coalesce(nullif(t.full_name, ''), t.id::text));
+end;
+$$;
+
+-- Deliberate ownership transfer (the ONLY way the Super Admin changes): the Super Admin must name the
+-- new owner's e-mail twice. The old owner becomes a normal admin with every permission except MANAGE_ADMINS.
+create or replace function public.transfer_super_admin(p_new_owner uuid, p_confirm_email text)
+returns void language plpgsql security definer set search_path = public as $$
+declare
+  me     uuid := auth.uid();
+  t      public.profiles;
+  v_mail text;
+  v_conf timestamptz;
+begin
+  if not public.is_super_admin() then
+    raise exception 'Only the Super Admin can transfer ownership.' using errcode = '42501';
+  end if;
+  select * into t from public.profiles where id = p_new_owner;
+  if not found or t.role <> 'admin' or t.is_suspended or t.id = me then
+    raise exception 'The new owner must be another active administrator.' using errcode = '22023';
+  end if;
+  select u.email, u.email_confirmed_at into v_mail, v_conf from auth.users u where u.id = t.id;
+  if v_conf is null or lower(btrim(coalesce(p_confirm_email, ''))) <> lower(v_mail) then
+    raise exception 'Type the new owner''s email address exactly to confirm.' using errcode = '22023';
+  end if;
+
+  perform set_config('beihub.rbac_rpc', 'on', true);
+  update public.profiles set role = 'admin' where id = me;              -- demote first (only one super admin may exist)
+  update public.profiles set role = 'super_admin', admin_since = coalesce(admin_since, now()) where id = t.id;
+  delete from public.admin_permissions where user_id = t.id;
+  insert into public.admin_permissions (user_id, permission, granted_by)
+  select me, c.code, me from public.permissions c where c.code <> 'MANAGE_ADMINS' on conflict do nothing;
+  delete from public.super_admin_bootstrap;
+  insert into public.super_admin_bootstrap (email) values (lower(v_mail));
+
+  perform public.write_audit('admin.ownership_transferred', 'admin', t.id::text, v_mail, jsonb_build_object('owner', me), jsonb_build_object('owner', t.id),
+    'Transferred Super Admin ownership to ' || v_mail);
+end;
+$$;
+
+grant execute on function public.admin_list_admins(), public.admin_set_admin_permissions(uuid, text[]),
+  public.admin_set_admin_suspended(uuid, boolean, text), public.admin_revoke_admin(uuid),
+  public.transfer_super_admin(uuid, text) to authenticated;
+revoke all on function public.admin_list_admins(), public.admin_set_admin_permissions(uuid, text[]),
+  public.admin_set_admin_suspended(uuid, boolean, text), public.admin_revoke_admin(uuid),
+  public.transfer_super_admin(uuid, text) from public, anon;
+
+
+-- ---------------------------------------------------------------------
+-- 11. CUSTOMER MANAGEMENT + ORDER TRACKING  (MANAGE_CUSTOMERS; the Super Admin has it implicitly)
+--     A customer's orders are read with the normal orders policy (can_view_orders), filtered by user_id.
+-- ---------------------------------------------------------------------
+create or replace function public.admin_list_customers(
+  p_search text default null,
+  p_filter text default 'all',      -- all | active | suspended | verified | unverified | has_orders | no_orders
+  p_limit  integer default 50,
+  p_offset integer default 0,
+  p_user   uuid default null)
+returns table (id uuid, full_name text, email text, phone text, is_suspended boolean, suspended_reason text,
+               email_verified boolean, created_at timestamptz, last_login_at timestamptz,
+               order_count bigint, total_value numeric, last_order_at timestamptz, total_rows bigint)
+language plpgsql security definer set search_path = public as $$
+declare v_s text := lower(btrim(coalesce(p_search, '')));
+begin
+  if not public.has_permission('MANAGE_CUSTOMERS') then
+    raise exception 'You do not have permission to manage customers.' using errcode = '42501';
+  end if;
+  if p_filter not in ('all', 'active', 'suspended', 'verified', 'unverified', 'has_orders', 'no_orders') then
+    raise exception 'Unknown filter.' using errcode = '22023';
+  end if;
+  return query
+  with base as (
+    select p.id, p.full_name, u.email::text as email, p.phone, p.is_suspended, p.suspended_reason,
+           (u.email_confirmed_at is not null) as email_verified, p.created_at,
+           coalesce(p.last_login_at, u.last_sign_in_at) as last_login_at,
+           (select count(*) from public.orders o where o.user_id = p.id) as order_count,
+           (select coalesce(sum(o.total) filter (where o.status <> 'cancelled'), 0) from public.orders o where o.user_id = p.id) as total_value,
+           (select max(o.created_at) from public.orders o where o.user_id = p.id) as last_order_at
+      from public.profiles p join auth.users u on u.id = p.id
+     where p.role = 'customer' and (p_user is null or p.id = p_user)
+  )
+  select b.id, b.full_name, b.email, b.phone, b.is_suspended, b.suspended_reason, b.email_verified, b.created_at,
+         b.last_login_at, b.order_count, b.total_value, b.last_order_at, count(*) over ()
+    from base b
+   where (v_s = '' or strpos(lower(coalesce(b.full_name, '')), v_s) > 0 or strpos(lower(coalesce(b.email, '')), v_s) > 0
+          or strpos(lower(coalesce(b.phone, '')), v_s) > 0)
+     and case p_filter
+           when 'active'     then not b.is_suspended
+           when 'suspended'  then b.is_suspended
+           when 'verified'   then b.email_verified
+           when 'unverified' then not b.email_verified
+           when 'has_orders' then b.order_count > 0
+           when 'no_orders'  then b.order_count = 0
+           else true end
+   order by b.created_at desc
+   limit greatest(least(coalesce(p_limit, 50), 200), 1) offset greatest(coalesce(p_offset, 0), 0);
+end;
+$$;
+
+create or replace function public.admin_set_customer_suspended(p_user uuid, p_suspended boolean, p_reason text default null)
+returns void language plpgsql security definer set search_path = public as $$
+declare
+  t     public.profiles;
+  v_why text := nullif(btrim(coalesce(p_reason, '')), '');
+begin
+  if not public.has_permission('MANAGE_CUSTOMERS') then
+    raise exception 'You do not have permission to manage customers.' using errcode = '42501';
+  end if;
+  select * into t from public.profiles where id = p_user;
+  if not found or t.role <> 'customer' then
+    raise exception 'Customer not found.' using errcode = '22023';
+  end if;
+  if p_suspended and v_why is null then
+    raise exception 'Enter a reason for the suspension.' using errcode = '22023';
+  end if;
+  perform set_config('beihub.rbac_rpc', 'on', true);
+  update public.profiles
+     set is_suspended = p_suspended,
+         suspended_reason = case when p_suspended then v_why else null end,
+         suspended_at = case when p_suspended then now() else null end,
+         suspended_by = case when p_suspended then auth.uid() else null end
+   where id = t.id;
+  perform public.write_audit(case when p_suspended then 'customer.suspended' else 'customer.reactivated' end, 'customer', t.id::text,
+    coalesce(nullif(t.full_name, ''), t.id::text), jsonb_build_object('suspended', t.is_suspended),
+    jsonb_build_object('suspended', p_suspended, 'reason', v_why),
+    case when p_suspended then 'Suspended customer ' else 'Reactivated customer ' end || coalesce(nullif(t.full_name, ''), t.id::text));
 end;
 $$;
 
 
 -- ---------------------------------------------------------------------
--- 5. SECURITY: privileges + Row Level Security for everything above
---    Nobody but the admin can write business information, products, prices, images,
---    order statuses, cancellation reasons or settings. The public can only READ the
---    public catalogue. Customers see only their own orders / notifications.
+-- 12. LOGIN / LOGOUT TRACKING  (Supabase Auth stays the authority for passwords and sessions)
+--     The browser reports "I just signed in / out"; the server only ever records it for auth.uid().
+--     Failed attempts are not available to SQL in Supabase (see Authentication > Logs).
 -- ---------------------------------------------------------------------
-revoke all on public.order_cancellation_reasons, public.order_update_templates from anon, authenticated;
-grant select, insert, update, delete on public.order_cancellation_reasons, public.order_update_templates to authenticated;  -- RLS: admin only
+create or replace function public.record_login()
+returns void language plpgsql security definer set search_path = public as $$
+declare v_role text;
+begin
+  if auth.uid() is null then return; end if;
+  perform set_config('beihub.rbac_rpc', 'on', true);
+  update public.profiles set last_login_at = now() where id = auth.uid() returning role into v_role;
+  if v_role in ('admin', 'super_admin') then
+    perform public.write_audit('auth.login', 'user', auth.uid()::text, null, null, null, 'Signed in');
+  end if;
+end;
+$$;
 
-alter table public.order_cancellation_reasons enable row level security;
-alter table public.order_update_templates     enable row level security;
-
-drop policy if exists "order_cancellation_reasons: admin all" on public.order_cancellation_reasons;
-create policy "order_cancellation_reasons: admin all" on public.order_cancellation_reasons
-  for all to authenticated using (public.is_admin()) with check (public.is_admin());
-
-drop policy if exists "order_update_templates: admin all" on public.order_update_templates;
-create policy "order_update_templates: admin all" on public.order_update_templates
-  for all to authenticated using (public.is_admin()) with check (public.is_admin());
-
--- Order functions: signed-in users only (each one re-checks admin inside)
-revoke all on function public.admin_set_order_status(uuid, text, text, text, text, text) from public, anon;
-revoke all on function public.admin_send_order_update(uuid, text, text)                   from public, anon;
-grant execute on function public.admin_set_order_status(uuid, text, text, text, text, text) to authenticated;
-grant execute on function public.admin_send_order_update(uuid, text, text)                   to authenticated;
-grant execute on function public.product_is_public(uuid) to anon, authenticated;
-
--- Re-state the write rules for the business-information record (idempotent; same as the original schema).
-drop policy if exists "store_settings: public read" on public.store_settings;
-create policy "store_settings: public read" on public.store_settings
-  for select using (true);
-drop policy if exists "store_settings: admin write" on public.store_settings;
-create policy "store_settings: admin write" on public.store_settings
-  for all to authenticated using (public.is_admin()) with check (public.is_admin());
-revoke insert, update, delete on public.store_settings from anon;
-
--- Anonymous visitors may never write to anything shared.
-revoke insert, update, delete on
-  public.categories, public.products, public.product_images, public.product_variants,
-  public.delivery_locations, public.site_media, public.store_settings from anon;
+create or replace function public.record_logout()
+returns void language plpgsql security definer set search_path = public as $$
+declare v_role text;
+begin
+  if auth.uid() is null then return; end if;
+  perform set_config('beihub.rbac_rpc', 'on', true);
+  update public.profiles set last_logout_at = now() where id = auth.uid() returning role into v_role;
+  if v_role in ('admin', 'super_admin') then
+    perform public.write_audit('auth.logout', 'user', auth.uid()::text, null, null, null, 'Signed out');
+  end if;
+end;
+$$;
+grant execute on function public.admin_list_customers(text, text, integer, integer, uuid), public.admin_set_customer_suspended(uuid, boolean, text),
+  public.record_login(), public.record_logout() to authenticated;
+revoke all on function public.admin_list_customers(text, text, integer, integer, uuid), public.admin_set_customer_suspended(uuid, boolean, text),
+  public.record_login(), public.record_logout() from public, anon;
 
 
 -- ---------------------------------------------------------------------
--- 6. REALTIME
---    The database stays the source of truth. These publications only tell open pages
---    "something changed - fetch it again"; a page that misses the event still gets the
---    latest data the next time it loads or regains focus.
---    Row Level Security applies to Realtime too: a customer only receives events for rows
---    they are allowed to SELECT (their own orders / notifications / timeline).
+-- 13. DASHBOARD FIGURES  (each block is returned only if the caller holds the matching permission)
+-- ---------------------------------------------------------------------
+create or replace function public.admin_dashboard_stats()
+returns jsonb language plpgsql security definer set search_path = public as $$
+declare
+  v_orders  boolean := public.can_view_orders();
+  v_cust    boolean := public.has_any_permission(array['MANAGE_CUSTOMERS', 'VIEW_REPORTS']);
+  v_admins  boolean := public._can_manage_admins();
+  v_audit   boolean := public.has_permission('VIEW_AUDIT_LOGS');
+  v_catalog boolean := public.has_any_permission(array['MANAGE_PRODUCTS', 'MANAGE_PRODUCT_PRICES', 'VIEW_REPORTS']);
+  r jsonb := '{}'::jsonb;
+begin
+  if not public.is_admin() then
+    raise exception 'Not authorised.' using errcode = '42501';
+  end if;
+  if v_orders then
+    r := r || jsonb_build_object(
+      'orders', (select jsonb_build_object(
+                   'total', count(*), 'pending', count(*) filter (where status = 'pending'),
+                   'in_progress', count(*) filter (where status in ('confirmed', 'payment_pending', 'processing', 'ready_for_pickup', 'waiting_for_delivery')),
+                   'completed', count(*) filter (where status = 'completed'), 'cancelled', count(*) filter (where status = 'cancelled'))
+                   from public.orders),
+      'recent_orders', coalesce((select jsonb_agg(x) from (select o.id, o.order_number, o.customer_name, o.total, o.status, o.created_at
+                                   from public.orders o order by o.created_at desc limit 6) x), '[]'::jsonb),
+      'recent_cancellations', coalesce((select jsonb_agg(x) from (select o.id, o.order_number, o.cancellation_reason, o.cancelled_at
+                                   from public.orders o where o.status = 'cancelled' order by o.cancelled_at desc nulls last limit 5) x), '[]'::jsonb));
+  end if;
+  if v_cust then
+    r := r || jsonb_build_object(
+      'customers', (select jsonb_build_object('total', count(*), 'suspended', count(*) filter (where is_suspended)) from public.profiles where role = 'customer'),
+      'recent_customers', coalesce((select jsonb_agg(x) from (select p.id, p.full_name, p.created_at from public.profiles p
+                                   where p.role = 'customer' order by p.created_at desc limit 5) x), '[]'::jsonb));
+  end if;
+  if v_admins then
+    r := r || jsonb_build_object(
+      'admins', (select jsonb_build_object('total', count(*), 'active', count(*) filter (where not is_suspended))
+                   from public.profiles where role in ('admin', 'super_admin')),
+      'pending_invitations', (select count(*) from public.admin_invitations where status = 'pending' and expires_at > now()));
+  end if;
+  if v_audit then
+    r := r || jsonb_build_object('recent_activity', coalesce((select jsonb_agg(x) from (
+      select a.action, a.actor_email, a.actor_role, a.description, a.created_at from public.audit_log a order by a.created_at desc limit 8) x), '[]'::jsonb));
+  end if;
+  if v_catalog then
+    r := r || jsonb_build_object(
+      'stock_alerts', (select jsonb_build_object('out_of_stock', count(*) filter (where v.availability = 'out_of_stock' or v.stock = 0),
+                                                 'low_stock', count(*) filter (where v.availability <> 'out_of_stock' and v.stock between 1 and 3))
+                         from public.product_variants v join public.products p on p.id = v.product_id where p.is_active),
+      'recent_products', coalesce((select jsonb_agg(x) from (select p.id, p.name, p.updated_at from public.products p order by p.updated_at desc limit 5) x), '[]'::jsonb));
+  end if;
+  return r;
+end;
+$$;
+grant execute on function public.admin_dashboard_stats() to authenticated;
+revoke all on function public.admin_dashboard_stats() from public, anon;
+
+
+-- ---------------------------------------------------------------------
+-- 14. REALTIME: a suspended / re-permissioned person's open screens refresh
 -- ---------------------------------------------------------------------
 do $$
-declare
-  t text;
-  v_all boolean;
+declare v_all boolean;
 begin
   select puballtables into v_all from pg_publication where pubname = 'supabase_realtime';
-  if v_all is null then
-    raise notice 'Publication supabase_realtime not found - enable Realtime for these tables in Dashboard > Database > Replication.';
-  elsif v_all then
-    raise notice 'supabase_realtime already publishes all tables.';
-  else
-    foreach t in array array['products', 'product_variants', 'product_images', 'categories', 'store_settings',
-                             'delivery_locations', 'site_media', 'orders', 'order_events', 'notifications'] loop
-      if not exists (select 1 from pg_publication_tables where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = t) then
-        execute format('alter publication supabase_realtime add table public.%I', t);
-      end if;
-    end loop;
+  if v_all is false then
+    if not exists (select 1 from pg_publication_tables where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'admin_permissions') then
+      alter publication supabase_realtime add table public.admin_permissions;
+    end if;
+    if not exists (select 1 from pg_publication_tables where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'profiles') then
+      alter publication supabase_realtime add table public.profiles;   -- subscribers only receive rows RLS lets them read
+    end if;
   end if;
 end $$;
-
--- DELETE / filtered UPDATE events need the full old row
-alter table public.products           replica identity full;
-alter table public.product_variants   replica identity full;
-alter table public.product_images     replica identity full;
-alter table public.categories         replica identity full;
-alter table public.store_settings     replica identity full;
-alter table public.delivery_locations replica identity full;
-alter table public.site_media         replica identity full;
-alter table public.orders             replica identity full;
-alter table public.order_events       replica identity full;
-alter table public.notifications      replica identity full;
-
+alter table public.admin_permissions replica identity full;
+alter table public.profiles          replica identity full;
 
 -- ---------------------------------------------------------------------
--- 7. INDEXES for the admin order list and the customer "my orders" view
--- ---------------------------------------------------------------------
-create index if not exists orders_status_created_idx on public.orders (status, created_at desc);
-create index if not exists order_events_created_idx  on public.order_events (created_at desc);
-
-
--- ---------------------------------------------------------------------
--- 8. DONE. Quick sanity checks you can run:
---   select business_name, phone, whatsapp, email, address from public.store_settings;   -- the ONE business record
---   select code, label from public.order_cancellation_reasons order by sort_order;
---   select tablename from pg_publication_tables where pubname = 'supabase_realtime' order by 1;
---   select count(*) from public.legacy_shops_archive;                                   -- only if shops existed
+-- 15. DONE. Useful checks:
+--   select email, role from auth.users u join public.profiles p on p.id = u.id where p.role <> 'customer';
+--   select code, label from public.permissions order by sort_order;
+--   select p.full_name, ap.permission from public.admin_permissions ap join public.profiles p on p.id = ap.user_id order by 1, 2;
+--   select * from public.audit_log order by created_at desc limit 20;
 -- ---------------------------------------------------------------------

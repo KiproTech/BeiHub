@@ -5,6 +5,7 @@ import { OrderContact, OrderSheet, OrderStatusPill, OrderTimeline, OrderTracker,
 import { ConfirmDialog, ProductImage } from '../../components/ui.jsx'
 import { Card, PageHead, confirmDelete } from './parts.jsx'
 import { useAdmin } from './AdminContext.jsx'
+import { useAuth } from '../../context/AuthContext.jsx'
 import { useStore } from '../../context/StoreContext.jsx'
 import { api } from '../../lib/api.js'
 import { fmtDate, money, waDigits } from '../../lib/format.js'
@@ -80,6 +81,7 @@ const STEP_HELP = {
 }
 
 export function OrderDetail({ id }) {
+  const { can, canAny } = useAuth()
   const { orders, reload, run, cancelReasons, updateTemplates } = useAdmin()
   const { settings } = useStore()
   const navigate = useNavigate()
@@ -100,8 +102,11 @@ export function OrderDetail({ id }) {
     )
 
   const next = allowedNext(order)
-  const forward = next.filter((s) => s !== 'cancelled')
-  const canCancel = next.includes('cancelled')
+  // buttons follow the permissions (the database enforces the same rules on the request itself)
+  const forward = can('UPDATE_ORDER_STATUS') ? next.filter((s) => s !== 'cancelled') : []
+  const canCancel = can('CANCEL_ORDERS') && next.includes('cancelled')
+  const canMessage = canAny(['MANAGE_ORDERS', 'MANAGE_NOTIFICATIONS'])
+  const canManage = can('MANAGE_ORDERS')
   const depositBlocked = (s) => s === 'processing' && order.payment_status !== 'confirmed' && order.deposit_amount > 0
   const close = () => { setDialog(null); setText(''); setReasonCode(''); setUpdateCode('') }
   const reason = (cancelReasons || []).find((r) => r.code === reasonCode)
@@ -147,7 +152,7 @@ export function OrderDetail({ id }) {
                 {s === 'completed' ? <Icon name="check" size={16} /> : null} Mark as {statusInfo(s).label.toLowerCase()}
               </button>
             ))}
-            <button className="btn btn-outline" onClick={() => setDialog({ kind: 'update' })}><Icon name="mail" size={16} /> Send update</button>
+            {canMessage && <button className="btn btn-outline" onClick={() => setDialog({ kind: 'update' })}><Icon name="mail" size={16} /> Send update</button>}
             {canCancel && <button className="btn btn-outline vcard-del" onClick={() => setDialog({ kind: 'cancel', value: 'cancelled' })}><Icon name="close" size={16} /> Cancel order</button>}
           </div>
         )}
@@ -165,9 +170,9 @@ export function OrderDetail({ id }) {
           </dl>
           {!['cancelled', 'completed'].includes(order.status) && (
             <div className="btnrow">
-              {order.payment_status !== 'pending' && <button className="btn btn-sm btn-outline" onClick={() => setDialog({ kind: 'payment', value: 'pending' })}>Mark payment pending</button>}
-              {order.payment_status !== 'confirmed' && <button className="btn btn-sm btn-primary" onClick={() => setDialog({ kind: 'payment', value: 'confirmed' })}>Mark payment confirmed</button>}
-              {order.payment_status !== 'unpaid' && <button className="btn btn-sm btn-outline" onClick={() => setDialog({ kind: 'payment', value: 'unpaid' })}>Reset to not paid</button>}
+              {canManage && order.payment_status !== 'pending' && <button className="btn btn-sm btn-outline" onClick={() => setDialog({ kind: 'payment', value: 'pending' })}>Mark payment pending</button>}
+              {canManage && order.payment_status !== 'confirmed' && <button className="btn btn-sm btn-primary" onClick={() => setDialog({ kind: 'payment', value: 'confirmed' })}>Mark payment confirmed</button>}
+              {canManage && order.payment_status !== 'unpaid' && <button className="btn btn-sm btn-outline" onClick={() => setDialog({ kind: 'payment', value: 'unpaid' })}>Reset to not paid</button>}
             </div>
           )}
         </Card>
@@ -207,10 +212,14 @@ export function OrderDetail({ id }) {
 
       <Card title="Timeline and history" sub="Customer-visible updates and internal notes (marked Internal) in one list.">
         <OrderTimeline events={order.events} admin />
-        <label className="field"><span>Add an internal note (the customer cannot see it)</span>
-          <textarea rows={2} value={note} onChange={(e) => setNote(e.target.value)} placeholder="e.g. Called customer, deposit via M-Pesa, delivery booked for Friday" />
-        </label>
-        <button className="btn btn-outline btn-sm" disabled={!note.trim()} onClick={addNote}>Add note</button>
+        {canManage && (
+          <>
+            <label className="field"><span>Add an internal note (the customer cannot see it)</span>
+              <textarea rows={2} value={note} onChange={(e) => setNote(e.target.value)} placeholder="e.g. Called customer, deposit via M-Pesa, delivery booked for Friday" />
+            </label>
+            <button className="btn btn-outline btn-sm" disabled={!note.trim()} onClick={addNote}>Add note</button>
+          </>
+        )}
       </Card>
 
       <Card title="Danger zone"><button className="btn btn-outline vcard-del" onClick={del}><Icon name="trash" size={16} /> Delete this order</button><p className="muted small">Deleting removes the order and its history for good. Cancel it instead if you want the customer to keep a record.</p></Card>

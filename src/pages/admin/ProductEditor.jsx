@@ -3,6 +3,7 @@ import { Link, useNavigate } from '../../lib/router.jsx'
 import { Icon } from '../../components/Icons.jsx'
 import { Modal, ProductImage } from '../../components/ui.jsx'
 import { Card, Field, KeyValueEditor, PageHead, Toggle, confirmDelete } from './parts.jsx'
+import { useAuth } from '../../context/AuthContext.jsx'
 import { useAdmin } from './AdminContext.jsx'
 import { api } from '../../lib/api.js'
 import { PRODUCT_STATUSES, discountPercent, money, slugify } from '../../lib/format.js'
@@ -200,6 +201,7 @@ function VariantManager({ product }) {
 /* ------------------------------ main editor ------------------------------ */
 export default function ProductEditor({ id }) {
   const { products, categories, reload, run } = useAdmin()
+  const { can } = useAuth()
   const navigate = useNavigate()
   const product = id ? products.find((p) => p.id === id) : null
   const [f, setF] = useState(() => ({
@@ -243,6 +245,11 @@ export default function ProductEditor({ id }) {
 
   return (
     <>
+      {(!can('MANAGE_PRODUCTS') || !can('MANAGE_PRODUCT_PRICES') || !can('MANAGE_PRODUCT_IMAGES')) && (
+        <div className="notice notice-warn" role="note">
+          <span>Your account can: {[can('MANAGE_PRODUCTS') && 'edit product details and stock', can('MANAGE_PRODUCT_PRICES') && 'change prices', can('MANAGE_PRODUCT_IMAGES') && 'manage images'].filter(Boolean).join(', ') || 'view only'}. Changes outside that are refused when you save.</span>
+        </div>
+      )}
       <PageHead title={product ? product.name : 'Add product'} sub={product ? 'Edit details, images and variants.' : 'Start with the basics. You can add images and variants right after saving.'}>
         <Link to="/admin/products" className="btn btn-outline"><Icon name="left" size={16} /> All products</Link>
         {product && <Link to={`/product/${product.slug}`} target="_blank" className="btn btn-outline"><Icon name="eye" size={16} /> View on website</Link>}

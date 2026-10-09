@@ -12,6 +12,10 @@ Ordering flow: Product > Add to Order List > Review order > Contact details > Co
 
 > **One source of truth: Supabase.** Products, prices, availability, images, business information (phone, WhatsApp, email, address, hours...), orders, order statuses and notifications are stored **only** in your Supabase project. Every phone, tablet and computer reads the same data. There is **no demo mode** and nothing shared is kept in the browser: without the Supabase variables the site shows a setup screen. The browser only keeps this device's login session, the Order List being built and the typed-in contact details (cleared on log out).
 
+### Several people in one browser
+
+Each browser **tab** has its own login, so one tab can be the Super Admin while another is a customer and a third is a second admin, all at once. Logging in, switching account or logging out in one tab never changes another tab. A login lasts as long as its tab (reloading keeps it, closing the tab ends it, a new tab starts logged out). See section 6b for how this works and why it is safe.
+
 ### How changes reach every device
 
 ```
@@ -76,15 +80,18 @@ Copy `.env.example` to `.env` in the project root (it is git-ignored), or add th
    | --- | --- | --- |
    | 1 | `supabase/BeiHub_database.sql` | Original schema, storage bucket, sample products, settings |
    | 2 | `supabase/archive/01_marketplace_upgrade.sql` | Order lifecycle, timeline, notifications, audit log, site media, contact fields |
-   | 3 | **`supabase/beihub_migration.sql`** | **Single-business upgrade:** validated business settings, removes the multi-shop logic, predefined cancellation reasons and customer updates, Realtime, admin-only write policies |
+   | 3 | `supabase/archive/02_single_business_upgrade.sql` | Single business: validated business settings, no multi-shop logic, predefined cancellation reasons and customer updates, Realtime |
+   | 4 | **`supabase/beihub_migration.sql`** | **Roles and permissions:** Super Admin, admin invitations, permission-based security rules, customer tracking, tamper-proof audit log, login tracking |
 
-   **Already ran 1 and 2 on your project? Run only file 3.** It refuses to run if 1 and 2 are missing.
-3. *(What file 3 does to existing shops: the first approved shop's contact details are copied into the business settings **only where those are still empty**. `products.shop_id` and `order_items.shop_id` are dropped. If your `shops` table contained rows it is kept as `legacy_shops_archive` (visible to the admin only) so nothing is lost; if it was empty it is dropped. Once you have checked it you can remove it with `drop table public.legacy_shops_archive;`.)*
+   **Already ran files 1 to 3 on your project? Run only file 4.** It refuses to run if the earlier files are missing. Every file is safe to run again.
+3. *(What file 3 did to existing shops: the first approved shop's contact details are copied into the business settings **only where those are still empty**. `products.shop_id` and `order_items.shop_id` are dropped. If your `shops` table contained rows it is kept as `legacy_shops_archive` (visible to the admin only) so nothing is lost; if it was empty it is dropped. Once you have checked it you can remove it with `drop table public.legacy_shops_archive;`.)*
 4. Copy the Project URL and anon key into `.env` (section 3).
-4b. **Realtime:** file 3 adds the shared tables to the `supabase_realtime` publication. Check under **Database > Replication** (or Realtime) that `products`, `product_variants`, `product_images`, `categories`, `store_settings`, `delivery_locations`, `site_media`, `orders`, `order_events` and `notifications` are enabled; switch any missing one on.
+4b. **Realtime:** the migrations add the shared tables to the `supabase_realtime` publication. Check under **Database > Replication** (or Realtime) that `products`, `product_variants`, `product_images`, `categories`, `store_settings`, `delivery_locations`, `site_media`, `orders`, `order_events` and `notifications` are enabled; switch any missing one on.
 5. **Turn on email verification** (cannot be done in SQL): Dashboard > **Authentication > Sign In / Providers > Email** > enable **Confirm email**, and keep **Allow new users to sign up** ON (customers register themselves).
 6. **Authentication > URL Configuration:** set **Site URL** to your website address and add it (and `http://localhost:5173` for local work) under **Redirect URLs**. Verification and password-reset links return to the site through these.
 7. **Email delivery:** Supabase's built-in email sender allows only a few emails per hour and is meant for testing. Before launch add your own SMTP provider under **Project Settings > Authentication > SMTP Settings** (for example Resend, Brevo or Amazon SES). Optionally edit the **Confirm signup** and **Reset password** email templates under Authentication > Email Templates.
+8. **Administrator invitation e-mail** (needs SMTP from step 7 for real use). Invitations are sent through Supabase Auth as a one-time sign-in link, so edit the **Magic Link** template (Authentication > Email Templates) to read like an invitation, for example: *Subject:* `You have been invited to administer BeiHub`; *Body:* `You have been invited to become an administrator of BeiHub. <a href="{{ .ConfirmationURL }}">Accept invitation</a>. The link works once and expires.` Keep the `{{ .ConfirmationURL }}` placeholder. Customers never receive this template (they use password login).
+9. **Redirect URLs for invitations:** under Authentication > URL Configuration > Redirect URLs also add `https://your-site/**` (and `http://localhost:5173/**` for local work), so the invitation link may return to `/admin/accept-invite`.
 
 ### Database structure
 
@@ -105,19 +112,50 @@ The SQL files create a **public** bucket named `product-images` (5 MB limit; JPE
 
 Images are resized and compressed in the admin's browser before upload to save storage and customers' mobile data.
 
-## 5. Create the admin account
+## 5. The Super Admin and your administrators
 
-1. Supabase Dashboard > **Authentication > Users > Add user > Create new user**. Enter your email and a strong password and tick **Auto Confirm User**.
-2. In **SQL Editor** run (use your email):
+**The Super Admin is created automatically.** The database knows one owner e-mail (`akiprotichamos@gmail.com`, stored in the table `super_admin_bootstrap`, which no browser can read). To become Super Admin:
 
-```sql
-update public.profiles set role = 'admin'
-where id = (select id from auth.users where email = 'you@example.com');
-```
+1. Open `https://your-site/register`, register with that e-mail and choose a password.
+2. Click the verification link in the e-mail. **The role is granted only after Supabase has verified the address**, so nobody can get it by registering with that e-mail first.
+3. Open `https://your-site/admin` and sign in. You now see the **Administrators** section.
 
-3. Open `https://your-site/admin` and sign in.
+(If that account already exists and is verified, running `supabase/beihub_migration.sql` promotes it immediately.) To use a different owner e-mail on a new project, change the e-mail in the `insert into public.super_admin_bootstrap` line of the migration before running it.
 
-Customers register themselves (keep sign-ups **on**). Only profiles you promote with the SQL above are admins; customers can never change their own role.
+**Adding administrators:** Super Admin > **Administrators > Invite admin**. Enter name, phone, e-mail and tick the permissions. The person receives an e-mail with a one-time link (valid 7 days). They open it (this signs them in and verifies the e-mail), confirm name and phone, choose a password and only then become an administrator. A person who just registers on the website can never become an admin.
+
+| Invitation status | Meaning |
+| --- | --- |
+| Pending | Sent, not yet used, not expired |
+| Accepted | Used once; the admin exists |
+| Expired | 7 days passed; press **Resend** for a fresh link |
+| Revoked | Cancelled by the Super Admin |
+
+**Resend** creates a new link and cancels the old one. The invitation token is shown to nobody in the app and only its hash is stored.
+
+### Permissions
+
+| Permission | Allows |
+| --- | --- |
+| Manage products | Create, edit, hide, delete products, variants, stock, categories |
+| Manage prices | Change prices and previous prices |
+| Manage product images | Upload, replace, delete product pictures |
+| Manage orders | See orders, internal notes, payment status, send updates |
+| Update order status | Move orders forward |
+| Cancel orders | Cancel with a predefined reason |
+| Manage customers | See customers and their orders, suspend / reactivate customer accounts |
+| Manage business settings | Contact details, hours, delivery information and fees |
+| Manage media | Logo, banners, favicon and other site pictures |
+| View reports | Dashboard figures and order totals |
+| View audit logs | Read the audit log |
+| Manage notifications | Send customer updates |
+| Manage administrators | Invite, suspend, change other admins. **Only the Super Admin can grant it.** |
+
+Rules enforced by the database (not by the screens): nobody can change, suspend or remove the Super Admin; nobody can change their own permissions; an admin who was granted *Manage administrators* can only manage ordinary admins, can never grant that permission and can only grant permissions they hold themselves; only the Super Admin can delete orders. Changes apply immediately, even to someone who is already signed in. **Suspending** an admin cuts all access at once; **Revoke** turns them back into a normal customer.
+
+**Transferring ownership** is a deliberate, separate action (Administrators > Transfer ownership): the new owner must be an active, verified admin and you must type their e-mail. The old owner becomes a normal admin without *Manage administrators*. There is only ever one Super Admin.
+
+Customers register themselves (keep sign-ups **on**). Roles and account status can only be changed through these audited database functions: not by the browser, not by a customer, not by an admin editing a profile, and not even by the Super Admin through a plain table update.
 
 ## 6. First things to do in the admin
 
@@ -152,6 +190,17 @@ PENDING > CONFIRMED > PAYMENT_PENDING > PROCESSING > READY_FOR_PICKUP (pickup) o
 
 Customers follow progress in **My orders** (progress bar, timeline, cancellation reason) and in **Notifications**. Use **Print** for a delivery note with signature lines.
 
+## 6b. How sign-in works (several people in one browser)
+
+- **Supabase Auth is the only authentication.** There are no separate admin or customer login systems and no `currentRole` / `currentUser` values anywhere.
+- The login (a real Supabase token) is kept in the tab's `sessionStorage`, which browsers keep separately for every tab. That is why tabs do not overwrite each other. The older shared `localStorage` login is ignored and deleted.
+- The token only proves *who* you are. **What you may do is decided by the database** on every request (Row Level Security + permission functions). The screens ask the database "what am I?" (`my_access()`) only to decide what to show. Editing storage, cookies or the page cannot make a customer an admin: a forged token fails its signature check and a customer's requests are refused by the database. This was tested.
+- **Logout** ends only the tab you log out of (`scope=local`); other tabs and other devices stay signed in.
+- A **duplicated tab** (browser "Duplicate") starts logged out, because it would otherwise share the original tab's refresh token.
+- A login lasts as long as the tab. A brief internet drop no longer logs you out.
+- The Order List (cart) is stored in the browser and shared by tabs; the contact details typed at checkout are kept per tab.
+- **Last login / logout** are recorded for every account and shown to the Super Admin. **Failed sign-in attempts** are not available to the database in Supabase; see Authentication > Logs in the dashboard.
+
 ## 7. Production deployment
 
 ### Vercel
@@ -182,14 +231,16 @@ src/
   components/                  header, footer, product card, search, shared UI, setup screen
   pages/                       Home, Products, Categories, Product, About, Contact, OrderList, Checkout, Confirmation,
                                Auth (login, register, verify, reset), Account (orders, notifications, profile)
-  pages/admin/                 dashboard, orders, products, categories, customers, delivery, media, business settings, audit log
+  pages/admin/                 dashboard, orders, products, categories, customers, delivery, media, business settings, audit log,
+                               administrators (Super Admin), accept-invite
   lib/orderFlow.js             order statuses and allowed transitions (mirrors the database rules)
   data/catalog.js              sample catalogue (feeds the SQL seed)
 supabase/
   schema.sql, seed.sql         source of the base script
   BeiHub_database.sql          schema + seed                       (run 1st)
   archive/01_marketplace_upgrade.sql   order lifecycle, audit, media (run 2nd, skip if already done)
-  beihub_migration.sql         single-business upgrade             (run 3rd)
+  archive/02_single_business_upgrade.sql   single business     (run 3rd, skip if already done)
+  beihub_migration.sql         roles, permissions, invitations, audit  (run 4th)
 scripts/                       image generator and SQL builder
 public/sample-products/        sample illustrations (replace with real photos)
 ```

@@ -8,12 +8,12 @@ const Ctx = createContext(null)
 export const useList = () => useContext(Ctx)
 
 const LIST_KEY = 'beihub.list.v1'
-const CUSTOMER_KEY = 'beihub.customer.v1'
+const CUSTOMER_KEY = 'beihub.customer.v1' // per tab (sessionStorage); the Order List itself is shared by all tabs
 const EMPTY_CUSTOMER = { customer_name: '', phone: '', alternative_phone: '', whatsapp: '', customer_email: '', preferred_contact: 'phone', fulfilment_method: 'delivery', county: '', town: '', delivery_location: '', preferred_delivery_date: '', notes: '' }
 
 const read = (key, fallback) => {
   try {
-    const v = JSON.parse(localStorage.getItem(key) || 'null')
+    const v = JSON.parse((key === CUSTOMER_KEY ? sessionStorage : localStorage).getItem(key) || 'null')
     return v ?? fallback
   } catch {
     return fallback
@@ -35,7 +35,7 @@ export function ListProvider({ children }) {
   }, [items])
   useEffect(() => {
     try {
-      localStorage.setItem(CUSTOMER_KEY, JSON.stringify(customer))
+      sessionStorage.setItem(CUSTOMER_KEY, JSON.stringify(customer)) // personal details stay in THIS tab only
     } catch {
       /* ignore */
     }

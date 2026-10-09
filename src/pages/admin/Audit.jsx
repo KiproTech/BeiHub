@@ -14,7 +14,12 @@ const LABELS = {
   'order.update_sent': 'Sent order update to customer',
   'settings.contact_changed': 'Changed contact information', 'settings.changed': 'Changed settings', 'category.deleted': 'Deleted category',
   'user.role_changed': 'Changed user role', 'user.suspended': 'Suspended user', 'user.restored': 'Restored user',
+  'admin.invited': 'Invited an administrator', 'admin.invitation_accepted': 'Administrator accepted invitation', 'admin.invitation_resent': 'Re-sent an invitation',
+  'admin.invitation_revoked': 'Revoked an invitation', 'admin.permissions_changed': 'Changed administrator permissions', 'admin.suspended': 'Suspended an administrator',
+  'admin.reactivated': 'Reactivated an administrator', 'admin.revoked': 'Removed administrator access', 'admin.ownership_transferred': 'Transferred Super Admin ownership',
+  'customer.suspended': 'Suspended a customer', 'customer.reactivated': 'Reactivated a customer', 'auth.login': 'Signed in', 'auth.logout': 'Signed out',
 }
+const ROLE = { super_admin: 'Super Admin', admin: 'Admin', customer: 'Customer' }
 const label = (a) => LABELS[a] || a.replace(/[._]/g, ' ')
 const show = (v) => (v == null ? 'empty' : typeof v === 'object' ? JSON.stringify(v) : String(v))
 
@@ -43,12 +48,12 @@ export default function Audit() {
   const types = useMemo(() => [...new Set((rows || []).map((r) => r.entity_type))].sort(), [rows])
   const shown = useMemo(() => {
     const t = q.trim().toLowerCase()
-    return (rows || []).filter((r) => (!type || r.entity_type === type) && (!t || `${label(r.action)} ${r.action} ${r.entity_label || ''} ${r.actor_email || ''}`.toLowerCase().includes(t)))
+    return (rows || []).filter((r) => (!type || r.entity_type === type) && (!t || `${label(r.action)} ${r.action} ${r.description || ''} ${r.entity_label || ''} ${r.actor_email || ''}`.toLowerCase().includes(t)))
   }, [rows, q, type])
 
   return (
     <>
-      <PageHead title="Audit log" sub="A record of important changes: who did what, when, and the old and new values.">
+      <PageHead title="Audit log" sub="A tamper-proof record of important actions: who did what, as which role, when, and the old and new values. It cannot be edited or deleted.">
         <button className="btn btn-outline" onClick={load}><Icon name="history" size={16} /> Refresh</button>
       </PageHead>
       <div className="afilters">
@@ -67,8 +72,8 @@ export default function Audit() {
                 {shown.map((r) => (
                   <tr key={r.id}>
                     <td data-label="When"><small>{fmtDate(r.created_at, true)}</small></td>
-                    <td data-label="Who">{r.actor_email || 'System'}<small className="block muted">{r.actor_role}</small></td>
-                    <td data-label="Action"><b>{label(r.action)}</b></td>
+                    <td data-label="Who">{r.actor_email || 'System'}<small className="block muted">{ROLE[r.actor_role] || r.actor_role}</small></td>
+                    <td data-label="Action"><b>{label(r.action)}</b>{r.description && <small className="block muted">{r.description}</small>}</td>
                     <td data-label="Record">{r.entity_label || r.entity_id}<small className="block muted">{r.entity_type}</small></td>
                     <td data-label="Changes"><Changes a={r} /></td>
                   </tr>

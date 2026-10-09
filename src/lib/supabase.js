@@ -2,24 +2,104 @@
 // Only the public ANON key is used here. Never put the service-role key in the frontend.
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from './config.js'
 
-const SESSION_KEY = 'beihub.auth'
+// ---------------------------------------------------------------------------------------------
+// SESSIONS ARE PER TAB.
+// The login lives in sessionStorage, which the browser keeps separately for every tab / window.
+// So one tab can be the Super Admin, another a customer, another a second admin - none overwrites
+// another, and logging out of one tab never logs out the others. Nothing here is trusted for
+// authorisation: the token is a real Supabase JWT and the database decides what it may do (RLS).
+// Closing the tab ends that login (the safe default); the Order List is kept separately.
+// ---------------------------------------------------------------------------------------------
+const SESSION_KEY = 'beihub.auth.tab'
+const LEGACY_SHARED_KEY = 'beihub.auth'   // older versions shared ONE login between all tabs: never adopt it
 const listeners = new Set()
 let session = null
+
+const memory = {}
+const tabStore = (() => {
+  try {
+    const k = '__beihub_probe__'
+    sessionStorage.setItem(k, '1')
+    sessionStorage.removeItem(k)
+    return sessionStorage
+  } catch {
+    // storage blocked: keep the login in memory for this tab only
+    return { getItem: (k) => memory[k] ?? null, setItem: (k, v) => { memory[k] = String(v) }, removeItem: (k) => { delete memory[k] } }
+  }
+})()
 try {
-  session = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null')
+  localStorage.removeItem(LEGACY_SHARED_KEY)
+} catch {
+  /* storage unavailable */
+}
+try {
+  session = JSON.parse(tabStore.getItem(SESSION_KEY) || 'null')
 } catch {
   session = null
 }
 
-function saveSession(s) {
-  session = s
+function persist(s) {
   try {
-    if (s) localStorage.setItem(SESSION_KEY, JSON.stringify(s))
-    else localStorage.removeItem(SESSION_KEY)
+    if (s) tabStore.setItem(SESSION_KEY, JSON.stringify(s))
+    else tabStore.removeItem(SESSION_KEY)
   } catch {
     /* storage unavailable */
   }
+}
+
+function saveSession(s) {
+  session = s
+  persist(s)
   listeners.forEach((fn) => fn(session))
+}
+
+// A DUPLICATED tab starts with a copy of the original tab's sessionStorage, i.e. the same refresh token.
+// Two tabs refreshing one token would make Supabase revoke it. So a tab that finds another live tab already
+// holding the same session lets go of its copy and starts logged out.
+const TAB_ID = Math.random().toString(36).slice(2) + Date.now().toString(36)
+const sidOf = (sess) => {
+  try {
+    const part = String(sess?.access_token || '').split('.')[1]
+    const claims = JSON.parse(atob(part.replace(/-/g, '+').replace(/_/g, '/')))
+    return claims.session_id || sess.refresh_token || null
+  } catch {
+    return null
+  }
+}
+let channel = null
+try {
+  channel = typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel('beihub-tab-sessions') : null
+} catch {
+  channel = null
+}
+let sessionReady = Promise.resolve()
+if (channel) {
+  channel.addEventListener('message', (e) => {
+    const m = e.data || {}
+    if (m.t === 'claim?' && m.from !== TAB_ID && session && sidOf(session) === m.sid) channel.postMessage({ t: 'held', sid: m.sid, to: m.from })
+  })
+  const mine = session && sidOf(session)
+  if (mine) {
+    sessionReady = new Promise((resolve) => {
+      const done = () => {
+        clearTimeout(timer)
+        channel.removeEventListener('message', onHeld)
+        resolve()
+      }
+      const onHeld = (e) => {
+        const m = e.data || {}
+        if (m.t === 'held' && m.to === TAB_ID && m.sid === mine) {
+          session = null
+          persist(null)
+          listeners.forEach((fn) => fn(null))
+          done()
+        }
+      }
+      const timer = setTimeout(done, 250)
+      channel.addEventListener('message', onHeld)
+      channel.postMessage({ t: 'claim?', sid: mine, from: TAB_ID })
+    })
+  }
 }
 
 // Supabase email links come back as  /path#access_token=...&type=signup|recovery  (or #error=...).
@@ -43,11 +123,7 @@ function parseAuthRedirect() {
       expires_at: Number(p.get('expires_at')) || Math.floor(Date.now() / 1000) + (Number(p.get('expires_in')) || 3600),
       user: null,
     }
-    try {
-      localStorage.setItem(SESSION_KEY, JSON.stringify(session))
-    } catch {
-      /* storage unavailable */
-    }
+    persist(session)
     authEvent = { type: p.get('type') || 'signup' }
     clean()
   } catch {
@@ -104,6 +180,7 @@ export async function signIn(email, password) {
   })
   const d = await parse(res)
   saveSession(toSession(d))
+  db.rpc('record_login').catch(() => {}) // last-login tracking; never blocks signing in
   return session
 }
 
@@ -116,18 +193,27 @@ async function refreshSession() {
       body: JSON.stringify({ refresh_token: session.refresh_token }),
     })
     saveSession(toSession(await parse(res)))
-  } catch {
-    saveSession(null)
+  } catch (e) {
+    // 400/401/403 = the refresh token is no longer valid -> signed out. A network error keeps the session and retries later.
+    if (e && [400, 401, 403].includes(e.status)) saveSession(null)
   }
   return session
 }
 
 export async function signOut() {
   const token = session?.access_token
+  if (token) {
+    try {
+      await db.rpc('record_logout') // needs the token, so before it is thrown away
+    } catch {
+      /* ignore */
+    }
+  }
   saveSession(null)
   if (token) {
     try {
-      await fetch(`${SUPABASE_URL}/auth/v1/logout`, { method: 'POST', headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${token}` } })
+      // scope=local: end ONLY this session. (The default, "global", would sign this user out of every tab and device.)
+      await fetch(`${SUPABASE_URL}/auth/v1/logout?scope=local`, { method: 'POST', headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${token}` } })
     } catch {
       /* ignore */
     }
@@ -157,6 +243,18 @@ export async function resendVerification(email) {
     method: 'POST',
     headers: { apikey: SUPABASE_ANON_KEY, 'Content-Type': 'application/json' },
     body: JSON.stringify({ type: 'signup', email }),
+  })
+  await parse(res)
+}
+
+// Sends the invitation e-mail through Supabase Auth (a one-time sign-in link). The link returns to
+// /admin/accept-invite?token=..., where the invitee sets a password; the database checks token + verified e-mail.
+export async function sendAdminInviteEmail(email, inviteToken, meta = {}) {
+  const back = encodeURIComponent(`${window.location.origin}/admin/accept-invite?token=${inviteToken}`)
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/otp?redirect_to=${back}`, {
+    method: 'POST',
+    headers: { apikey: SUPABASE_ANON_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, create_user: true, data: meta }),
   })
   await parse(res)
 }
@@ -193,6 +291,7 @@ export async function refreshAuthUser() {
 }
 
 async function token() {
+  await sessionReady
   if (session && session.expires_at - 30 < Math.floor(Date.now() / 1000)) await refreshSession()
   return session?.access_token || null
 }

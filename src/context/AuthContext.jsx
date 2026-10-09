@@ -3,6 +3,7 @@ import { api } from '../lib/api.js'
 import { useNavigate } from '../lib/router.jsx'
 import { useToast } from './ToastContext.jsx'
 import { takeNext } from '../lib/nextPath.js'
+import { useLiveRefresh } from '../lib/realtime.js'
 
 const Ctx = createContext(null)
 export const useAuth = () => useContext(Ctx)
@@ -35,6 +36,12 @@ export function AuthProvider({ children }) {
     handled.current = true
     const ev = api.takeAuthEvent()
     if (!ev) return
+    // The administrator invitation page handles its own link (a successful link signs the tab in; an expired one is explained on the page).
+    // It must NOT be redirected to "email verified" / the login page.
+    if (window.location.pathname === '/admin/accept-invite') {
+      if (ev.type !== 'error') refresh()
+      return
+    }
     if (ev.type === 'recovery') {
       navigate('/reset-password', { replace: true })
     } else if (ev.type === 'error') {
@@ -46,11 +53,22 @@ export function AuthProvider({ children }) {
     }
   }, [navigate, toast, refresh])
 
+  // Role / permissions are read from the database. If the Super Admin changes them (or suspends the account),
+  // this tab notices within seconds (Realtime) or at the latest when it regains focus - no new login needed.
+  useLiveRefresh(user ? [{ table: 'admin_permissions' }, { table: 'profiles', filter: `id=eq.${user.id}` }] : [], refresh, { enabled: !!user })
+
   const value = useMemo(
     () => ({
       user,
       loading,
-      isAdmin: user?.role === 'admin',
+      // These flags only decide what to SHOW. The database re-checks every request (RLS), so they grant nothing.
+      role: user?.role || null,
+      permissions: user?.permissions || [],
+      isStaff: ['admin', 'super_admin'].includes(user?.role) && !user?.suspended,
+      isSuperAdmin: user?.role === 'super_admin' && !user?.suspended,
+      isAdmin: ['admin', 'super_admin'].includes(user?.role) && !user?.suspended,
+      can: (perm) => !!user && !user.suspended && (user.role === 'super_admin' || (user.role === 'admin' && (user.permissions || []).includes(perm))),
+      canAny: (perms) => !!user && !user.suspended && (user.role === 'super_admin' || (user.role === 'admin' && perms.some((x) => (user.permissions || []).includes(x)))),
       isVerified: !!user?.email_verified,
       refresh,
       signIn: async (email, password) => {

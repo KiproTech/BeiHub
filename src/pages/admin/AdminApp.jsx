@@ -16,22 +16,42 @@ import Delivery from './Delivery.jsx'
 import Settings from './Settings.jsx'
 import Media from './Media.jsx'
 import Audit from './Audit.jsx'
+import Administrators from './Administrators.jsx'
+import AcceptInvite from './AcceptInvite.jsx'
 import '../../styles/admin.css'
 
+// `any` = the permissions that open a section (the person needs at least one). Only the menu and the screens
+// depend on this; the database enforces the same rules on every request.
+const ORDERS_VIEW = ['MANAGE_ORDERS', 'UPDATE_ORDER_STATUS', 'CANCEL_ORDERS', 'MANAGE_CUSTOMERS', 'VIEW_REPORTS']
+const PRODUCTS = ['MANAGE_PRODUCTS', 'MANAGE_PRODUCT_PRICES', 'MANAGE_PRODUCT_IMAGES']
 const NAV = [
   { to: '/admin', icon: 'dash', label: 'Dashboard', exact: true },
-  { to: '/admin/orders', icon: 'list', label: 'Orders' },
-  { to: '/admin/products', icon: 'box', label: 'Products' },
-  { to: '/admin/categories', icon: 'grid', label: 'Categories' },
-  { to: '/admin/customers', icon: 'users', label: 'Customers' },
-  { to: '/admin/delivery', icon: 'truck', label: 'Delivery' },
-  { to: '/admin/media', icon: 'image', label: 'Media' },
-  { to: '/admin/settings', icon: 'settings', label: 'Business Settings' },
-  { to: '/admin/audit', icon: 'history', label: 'Audit Logs' },
+  { to: '/admin/orders', icon: 'list', label: 'Orders', any: ORDERS_VIEW },
+  { to: '/admin/products', icon: 'box', label: 'Products', any: PRODUCTS },
+  { to: '/admin/categories', icon: 'grid', label: 'Categories', any: ['MANAGE_PRODUCTS'] },
+  { to: '/admin/customers', icon: 'users', label: 'Customers', any: ['MANAGE_CUSTOMERS'] },
+  { to: '/admin/delivery', icon: 'truck', label: 'Delivery', any: ['MANAGE_BUSINESS_SETTINGS'] },
+  { to: '/admin/media', icon: 'image', label: 'Media', any: ['MANAGE_MEDIA'] },
+  { to: '/admin/settings', icon: 'settings', label: 'Business Settings', any: ['MANAGE_BUSINESS_SETTINGS'] },
+  { to: '/admin/audit', icon: 'history', label: 'Audit Logs', any: ['VIEW_AUDIT_LOGS'] },
+  { to: '/admin/administrators', icon: 'shield', label: 'Administrators', any: ['MANAGE_ADMINS'], superArea: true },
 ]
+const ROLE_LABEL = { super_admin: 'Super Admin', admin: 'Admin', customer: 'Customer' }
+
+function NoAccess() {
+  return (
+    <div className="notice notice-warn" role="alert">
+      <Icon name="lock" size={18} /> <span>Your account does not have permission to open this section. Ask the Super Admin if you need access.</span>
+    </div>
+  )
+}
+function Gate({ any, children }) {
+  const { canAny } = useAuth()
+  return canAny(any) ? children : <NoAccess />
+}
 
 function Login() {
-  const { signIn, user, signOut } = useAuth()
+  const { signIn, user, signOut, isStaff } = useAuth()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
@@ -52,9 +72,9 @@ function Login() {
     <div className="login">
       <form className="login-card" onSubmit={submit}>
         <div className="login-brand"><LogoMark size={46} /><div><b>Admin</b><span>Sign in</span></div></div>
-        {user && user.role !== 'admin' ? (
+        {user && !isStaff ? (
           <>
-            <div className="notice notice-bad">You are signed in as {user.email}, but this account is not an admin. Ask the owner to give you admin access.</div>
+            <div className="notice notice-bad">{user.suspended ? `The administrator account ${user.email} is suspended. Contact the Super Admin.` : `You are signed in as ${user.email}, but this account is not an administrator. Ask the Super Admin to invite you.`}</div>
             <button type="button" className="btn btn-outline btn-block" onClick={signOut}>Sign out</button>
           </>
         ) : (
@@ -74,26 +94,28 @@ function Login() {
 function Shell() {
   const { pathname } = useLocation()
   const navigate = useNavigate()
-  const { user, signOut } = useAuth()
+  const { user, signOut, canAny } = useAuth()
   const { settings } = useStore()
   const { loading, error, reload, orders } = useAdmin()
   const [open, setOpen] = useState(false)
   useEffect(() => setOpen(false), [pathname])
   const newOrders = orders.filter((o) => o.status === 'pending').length
 
+  const g = (any, el) => <Gate any={any}>{el}</Gate>
   const routes = [
     { path: '/admin', render: () => <Dashboard /> },
-    { path: '/admin/products', render: () => <Products /> },
-    { path: '/admin/products/new', render: () => <ProductEditor key="new" /> },
-    { path: '/admin/products/:id', render: (p) => <ProductEditor key={p.id} id={p.id} /> },
-    { path: '/admin/categories', render: () => <Categories /> },
-    { path: '/admin/media', render: () => <Media /> },
-    { path: '/admin/audit', render: () => <Audit /> },
-    { path: '/admin/orders', render: () => <Orders /> },
-    { path: '/admin/orders/:id', render: (p) => <OrderDetail key={p.id} id={p.id} /> },
-    { path: '/admin/customers', render: () => <Customers /> },
-    { path: '/admin/delivery', render: () => <Delivery /> },
-    { path: '/admin/settings', render: () => <Settings /> },
+    { path: '/admin/products', render: () => g(PRODUCTS, <Products />) },
+    { path: '/admin/products/new', render: () => g(['MANAGE_PRODUCTS'], <ProductEditor key="new" />) },
+    { path: '/admin/products/:id', render: (p) => g(PRODUCTS, <ProductEditor key={p.id} id={p.id} />) },
+    { path: '/admin/categories', render: () => g(['MANAGE_PRODUCTS'], <Categories />) },
+    { path: '/admin/media', render: () => g(['MANAGE_MEDIA'], <Media />) },
+    { path: '/admin/audit', render: () => g(['VIEW_AUDIT_LOGS'], <Audit />) },
+    { path: '/admin/orders', render: () => g(ORDERS_VIEW, <Orders />) },
+    { path: '/admin/orders/:id', render: (p) => g(ORDERS_VIEW, <OrderDetail key={p.id} id={p.id} />) },
+    { path: '/admin/customers', render: () => g(['MANAGE_CUSTOMERS'], <Customers />) },
+    { path: '/admin/delivery', render: () => g(['MANAGE_BUSINESS_SETTINGS'], <Delivery />) },
+    { path: '/admin/settings', render: () => g(['MANAGE_BUSINESS_SETTINGS'], <Settings />) },
+    { path: '/admin/administrators', render: () => g(['MANAGE_ADMINS'], <Administrators />) },
   ]
 
   return (
@@ -101,6 +123,7 @@ function Shell() {
       <header className="admin-top">
         <button className="icon-btn" aria-label="Open menu" onClick={() => setOpen(true)}><Icon name="menu" /></button>
         <b>{settings.business_name} Admin</b>
+        <span className="whoami">{ROLE_LABEL[user?.role]}</span>
         <Link to="/" className="btn btn-sm btn-outline">View website</Link>
       </header>
       {open && <div className="admin-scrim" onClick={() => setOpen(false)} />}
@@ -111,10 +134,10 @@ function Shell() {
           <button className="icon-btn admin-close" aria-label="Close menu" onClick={() => setOpen(false)}><Icon name="close" /></button>
         </div>
         <nav>
-          {NAV.map((n) => {
+          {NAV.filter((n) => !n.any || canAny(n.any)).map((n) => {
             const active = n.exact ? pathname === n.to : pathname === n.to || pathname.startsWith(n.to + '/')
             return (
-              <Link key={n.to} to={n.to} className={`admin-link ${active ? 'is-active' : ''}`}>
+              <Link key={n.to} to={n.to} className={`admin-link ${active ? 'is-active' : ''}`} title={n.superArea ? 'Super Admin area' : undefined}>
                 <Icon name={n.icon} size={20} /> {n.label}
                 {n.to === '/admin/orders' && newOrders > 0 && <span className="badge-n">{newOrders}</span>}
               </Link>
@@ -124,7 +147,7 @@ function Shell() {
         <div className="admin-foot">
           <Link to="/" className="admin-link"><Icon name="eye" size={20} /> View website</Link>
           <button className="admin-link" onClick={async () => { await signOut(); navigate('/admin') }}><Icon name="logout" size={20} /> Sign out</button>
-          <small>{user?.email}</small>
+          <small>Signed in as <b>{user?.full_name || user?.email}</b><br />{ROLE_LABEL[user?.role]} &middot; {user?.email}</small>
         </div>
       </aside>
       <main className="admin-main">
@@ -136,9 +159,11 @@ function Shell() {
 }
 
 export default function AdminApp() {
-  const { user, loading } = useAuth()
+  const { user, loading, isStaff } = useAuth()
+  const { pathname } = useLocation()
+  if (pathname === '/admin/accept-invite') return <AcceptInvite />   // reached from the invitation e-mail, before the person is an admin
   if (loading) return <Spinner />
-  if (!user || user.role !== 'admin') return <Login />
+  if (!user || !isStaff) return <Login />
   return (
     <AdminProvider>
       <Shell />

@@ -1,4 +1,4 @@
-import { db, storage, signIn, signOut, signUp, resendVerification, recoverPassword, updatePassword, refreshAuthUser, takeAuthEvent, getSession, onAuthChange } from '../supabase.js'
+import { db, storage, signIn, signOut, signUp, resendVerification, recoverPassword, updatePassword, refreshAuthUser, takeAuthEvent, getSession, onAuthChange, sendAdminInviteEmail } from '../supabase.js'
 import { STORAGE_BUCKET } from '../config.js'
 import { prepareImage } from '../image.js'
 import { shapeProduct, shapeOrder, shapeSettings } from '../shape.js'
@@ -94,16 +94,25 @@ export const supabaseBackend = {
     } catch {
       profile = {}
     }
+    // Role + permissions as the DATABASE sees them right now. This only decides what the screens SHOW;
+    // every action is checked again by Row Level Security, so editing this object in the browser achieves nothing.
+    let access = null
+    try {
+      access = await db.rpc('my_access')
+    } catch {
+      access = null
+    }
     return {
       id: s.user.id,
       email: s.user.email,
-      role: profile.role || 'customer',
+      role: access?.role || profile.role || 'customer',
+      permissions: Array.isArray(access?.permissions) ? access.permissions : [],
       email_verified: !!s.user.email_confirmed_at,
       full_name: profile.full_name || s.user.user_metadata?.full_name || '',
       phone: profile.phone || '',
       alternative_phone: profile.alternative_phone || '',
       preferred_contact: profile.preferred_contact || 'phone',
-      suspended: !!profile.is_suspended,
+      suspended: !!(access?.suspended ?? profile.is_suspended),
     }
   },
   async checkVerified() {
@@ -283,6 +292,53 @@ export const supabaseBackend = {
   },
   async listAudit() {
     return db.select('audit_log', { order: 'created_at.desc', limit: 500 })
+  },
+
+  /* ---------- roles, administrators, invitations (every rule is enforced by the database) ---------- */
+  listAuditFor: (actorId) => db.select('audit_log', { filters: { actor_id: eq(actorId) }, order: 'created_at.desc', limit: 50 }),
+  listPermissions: () => db.select('permissions', { order: 'sort_order.asc' }),
+  dashboardStats: () => db.rpc('admin_dashboard_stats'),
+
+  listAdmins: () => db.rpc('admin_list_admins'),
+  listInvitations: () => db.rpc('admin_list_invitations'),
+  setAdminPermissions: (id, permissions) => db.rpc('admin_set_admin_permissions', { p_user: id, p_permissions: permissions }),
+  setAdminSuspended: (id, suspended, reason) => db.rpc('admin_set_admin_suspended', { p_user: id, p_suspended: suspended, p_reason: reason || null }),
+  revokeAdmin: (id) => db.rpc('admin_revoke_admin', { p_user: id }),
+  transferOwnership: (id, confirmEmail) => db.rpc('transfer_super_admin', { p_new_owner: id, p_confirm_email: confirmEmail }),
+  revokeInvitation: (id) => db.rpc('admin_revoke_invitation', { p_invitation: id }),
+
+  // 1. the database creates the invitation + one-time token, 2. Supabase Auth e-mails the invitee a sign-in link that carries it
+  async inviteAdmin({ email, full_name, phone, permissions }) {
+    const inv = await db.rpc('admin_create_invitation', { p_email: email, p_full_name: full_name, p_phone: phone, p_permissions: permissions })
+    try {
+      await sendAdminInviteEmail(inv.email, inv.token, { full_name, phone })
+      return { id: inv.id, emailSent: true }
+    } catch (e) {
+      return { id: inv.id, emailSent: false, emailError: e.message }
+    }
+  },
+  async resendInvitation(id) {
+    const inv = await db.rpc('admin_reissue_invitation', { p_invitation: id })
+    try {
+      await sendAdminInviteEmail(inv.email, inv.token)
+      return { emailSent: true }
+    } catch (e) {
+      return { emailSent: false, emailError: e.message }
+    }
+  },
+  invitationPreview: (token) => db.rpc('invitation_preview', { p_token: token }),
+  async acceptInvitation({ token, full_name, phone, password }) {
+    await updatePassword(password) // the invitee chooses a password for this verified account first
+    return db.rpc('accept_admin_invitation', { p_token: token, p_full_name: full_name, p_phone: phone })
+  },
+
+  /* ---------- customers + their orders ---------- */
+  listCustomers: ({ search, filter, limit = 50, offset = 0 } = {}) =>
+    db.rpc('admin_list_customers', { p_search: search || null, p_filter: filter || 'all', p_limit: limit, p_offset: offset }),
+  setCustomerSuspended: (id, suspended, reason) => db.rpc('admin_set_customer_suspended', { p_user: id, p_suspended: suspended, p_reason: reason || null }),
+  async listCustomerOrders(userId) {
+    const rows = await db.select('orders', { select: ORDER_SELECT, filters: { user_id: eq(userId) }, order: 'created_at.desc', limit: 200 })
+    return rows.map(shapeOrder)
   },
   // `changes` holds ONLY the fields the admin edited; `baseline` is the settings the admin was looking at.
   // Untouched fields are never sent, so a stale screen can never overwrite them. If someone else already changed
