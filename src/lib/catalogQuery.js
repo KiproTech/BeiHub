@@ -31,6 +31,9 @@ export const bestDiscount = (p) => Math.max(0, ...p.variants.map((v) => discount
 export function queryCatalog(products, catById, catBySlug, f = {}) {
   const tokens = tokenize(f.q || '')
   const catId = f.category ? catBySlug[f.category]?.id : null
+  // a category that is not in the customer catalogue (unknown, or it has no visible products) matches nothing,
+  // it must never fall back to "all products"
+  if (f.category && !catId) return []
   const min = f.min !== '' && f.min != null ? Number(f.min) : null
   const max = f.max !== '' && f.max != null ? Number(f.max) : null
   const rows = []
@@ -85,3 +88,16 @@ export function productsOnSale(products) {
 }
 export const saleVariant = (p) =>
   [...p.variants].filter((v) => discountPercent(v.previous_price, v.price) > 0).sort((a, b) => discountPercent(b.previous_price, b.price) - discountPercent(a.previous_price, a.price))[0] || cheapestVariant(p)
+
+// ---- customer-facing categories -----------------------------------------------------------
+// `products` is what customers are allowed to see (hidden / discontinued products are never in it).
+// A category is shown to customers only while it holds at least one of those products.
+export function categoryCounts(products) {
+  const counts = {}
+  for (const p of products || []) counts[p.category_id] = (counts[p.category_id] || 0) + 1
+  return counts
+}
+export function visibleCategories(categories, products) {
+  const counts = categoryCounts(products)
+  return (categories || []).filter((c) => counts[c.id] > 0)
+}

@@ -55,7 +55,7 @@ export function Header() {
             {user ? (
               <>
                 <Link to="/account/notifications" className="acctlink" aria-label={`Notifications${unread ? `, ${unread} unread` : ''}`}><Icon name="bell" size={20} />{unread > 0 && <span className="listbtn-count acct-badge">{unread}</span>}</Link>
-                <Link to={user.role === 'admin' ? '/admin' : '/account/orders'} className="acctlink"><Icon name="user" size={20} /><span>{user.role === 'admin' ? 'Admin' : 'My orders'}</span></Link>
+                <Link to={['admin', 'super_admin'].includes(user.role) ? '/admin' : '/account/orders'} className="acctlink"><Icon name="user" size={20} /><span>{['admin', 'super_admin'].includes(user.role) ? 'Admin' : 'My orders'}</span></Link>
               </>
             ) : (
               <Link to="/login" className="acctlink"><Icon name="user" size={20} /><span>Log in</span></Link>

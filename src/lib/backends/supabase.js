@@ -46,7 +46,9 @@ export const supabaseBackend = {
       db.select('store_settings', { filters: { id: eq(1) } }),
       db.select('categories', { filters: { is_active: 'eq.true' }, order: 'sort_order.asc,name.asc' }),
       db.select('delivery_locations', { filters: { is_active: 'eq.true' }, order: 'sort_order.asc,county.asc' }),
-      db.select('products', { select: PRODUCT_SELECT, filters: { is_active: 'eq.true' }, order: 'created_at.desc' }),
+      // is_active is kept in sync with status by the database; asking for the status too means a product that is
+      // hidden / discontinued can never reach the storefront even if the two ever drift apart.
+      db.select('products', { select: PRODUCT_SELECT, filters: { is_active: 'eq.true', status: 'in.(available,out_of_stock)' }, order: 'created_at.desc' }),
       db.select('site_media', { filters: { is_active: 'eq.true' }, order: 'sort_order.asc,created_at.asc' }),
     ])
     return {

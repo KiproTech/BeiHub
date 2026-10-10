@@ -124,20 +124,22 @@ export default function Home() {
       )}
       {loading && !products.length && <Spinner />}
 
-      <section className="section" id="categories">
-        <div className="wrap">
-          <SectionHead title="Browse by category" sub="Find what you need, with prices and availability." to="/categories" linkText="All categories" />
-          <div className="catgrid">
-            {categories.map((c) => (
-              <Link key={c.id} to={`/products?category=${c.slug}`} className="catcard">
-                <span className="catcard-img"><ProductImage src={c.image_url} alt="" /></span>
-                <span className="catcard-name">{c.name}</span>
-                <span className="catcard-count">{sections.counts[c.id] || 0} products</span>
-              </Link>
-            ))}
+      {categories.length > 0 && (
+        <section className="section" id="categories">
+          <div className="wrap">
+            <SectionHead title="Browse by category" sub="Find what you need, with prices and availability." to="/categories" linkText="All categories" />
+            <div className="catgrid">
+              {categories.map((c) => (
+                <Link key={c.id} to={`/products?category=${c.slug}`} className="catcard">
+                  <span className="catcard-img"><ProductImage src={c.image_url} alt="" /></span>
+                  <span className="catcard-name">{c.name}</span>
+                  <span className="catcard-count">{sections.counts[c.id] || 0} products</span>
+                </Link>
+              ))}
+            </div>
           </div>
-        </div>
-      </section>
+        </section>
+      )}
 
       <ProductRow id="featured" title="Featured products" sub="Hand-picked by our team." to="/products" rows={sections.featured} />
       <ProductRow id="offers" title="Special offers" sub="Reduced prices. See what you save." to="/products?sale=1&sort=discount" rows={sections.offers} />

@@ -10,16 +10,17 @@
     "preview": "vite preview",
     "lint": "oxlint",
     "generate:images": "node scripts/generate-images.mjs",
-    "generate:sql": "node scripts/build-sql.mjs"
+    "generate:sql": "node scripts/build-sql.mjs",
+    "test": "node --test tests/catalog-visibility.test.mjs"
   },
   "dependencies": {
-    "@supabase/realtime-js": "^2.117.3",
-    "react": "^19.3.0",
-    "react-dom": "^19.3.0"
+    "@supabase/realtime-js": "^2.117.2",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
   },
   "devDependencies": {
-    "@vitejs/plugin-react": "^6.1.2",
-    "oxlint": "^1.87.0",
-    "vite": "^8.3.3"
+    "@vitejs/plugin-react": "^6.1.1",
+    "oxlint": "^1.81.0",
+    "vite": "^8.3.0"
   }
 }

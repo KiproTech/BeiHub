@@ -3,6 +3,7 @@ import { api } from '../lib/api.js'
 import { friendlyError } from '../lib/errors.js'
 import { setDefaultImages } from '../components/ui.jsx'
 import { useLiveRefresh } from '../lib/realtime.js'
+import { categoryCounts, visibleCategories } from '../lib/catalogQuery.js'
 
 const Ctx = createContext(null)
 export const useStore = () => useContext(Ctx)
@@ -81,11 +82,16 @@ export function StoreProvider({ children }) {
 
   const value = useMemo(() => {
     const mediaList = (slot) => (data.media || []).filter((m) => m.slot === slot)
+    // `categories` is what customers see: a category with no customer-visible product is left out everywhere
+    // (home, Browse by category, menus, filters, search). catById keeps every active category so that the
+    // name of a visible product's category always resolves.
+    const categories = visibleCategories(data.categories, data.products)
     const catById = Object.fromEntries(data.categories.map((c) => [c.id, c]))
-    const catBySlug = Object.fromEntries(data.categories.map((c) => [c.slug, c]))
+    const catBySlug = Object.fromEntries(categories.map((c) => [c.slug, c]))
+    const counts = categoryCounts(data.products)
     const variantIndex = {}
     data.products.forEach((p) => p.variants.forEach((v) => (variantIndex[v.id] = { product: p, variant: v })))
-    return { ...data, catById, catBySlug, variantIndex, media: mediaPrimary, mediaList, loading, loaded, error, reload }
+    return { ...data, categories, categoryCounts: counts, catById, catBySlug, variantIndex, media: mediaPrimary, mediaList, loading, loaded, error, reload }
   }, [data, mediaPrimary, loading, loaded, error, reload])
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>

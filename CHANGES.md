@@ -1,3 +1,19 @@
+# Hidden products and empty categories
+
+- Customers no longer see a category that has no customer-visible product (home "Browse by category", Categories page,
+  footer menu, filters, search suggestions). The product count only counts products customers can see.
+- `src/lib/catalogQuery.js`: new `visibleCategories()` / `categoryCounts()`; a category filter that matches no visible
+  category now returns no products instead of falling back to every product.
+- `src/context/StoreContext.jsx`: `categories` is the customer list (visible categories only); `categoryCounts` is exposed.
+- `src/lib/backends/supabase.js`: the storefront asks for `status in (available, out_of_stock)` as well as `is_active`.
+- `src/pages/Home.jsx`, `src/pages/Categories.jsx`: no empty "Browse by category" block, friendly message when nothing is listed.
+- `src/components/Layout.jsx`: the Admin link now also shows for the Super Admin.
+- `supabase/hidden_products_migration.sql` (new, safe to re-run): status is the source of truth, `is_active` is re-synced,
+  public read rules for products / images / variants / categories check the status, and `submit_order()` is verified.
+- `tests/catalog-visibility.test.mjs` + `npm test`.
+
+---
+
 # Changes
 
 ## Roles, permissions, Super Admin and independent tab sessions (this release)

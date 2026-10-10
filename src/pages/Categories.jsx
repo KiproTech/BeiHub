@@ -10,7 +10,9 @@ export default function Categories() {
     <div className="wrap section">
       <h1>Categories</h1>
       <p className="muted">Pick a category to see its products, prices and availability.</p>
-      {loading && !categories.length ? <Spinner /> : (
+      {loading && !categories.length ? <Spinner /> : !categories.length ? (
+        <p className="muted">No products are available right now. Please check back soon.</p>
+      ) : (
         <div className="catgrid">
           {categories.map((c) => (
             <Link key={c.id} to={`/products?category=${c.slug}`} className="catcard">
